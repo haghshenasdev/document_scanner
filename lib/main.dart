@@ -754,7 +754,7 @@ class _ScannerPageState extends State<ScannerPage> {
       // ------------------------------------------------------
 
       final jpg = Uint8List.fromList(
-        img.encodeJpg(filteredImage!, quality: 95),
+        img.encodeJpg(filteredImage!, quality: 100),
       );
 
       // ------------------------------------------------------

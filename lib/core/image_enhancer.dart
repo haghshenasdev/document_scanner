@@ -1,4 +1,3 @@
-import 'dart:math' as math;
 import 'package:image/image.dart' as img;
 
 enum ScanFilter { original, document, sharp, grayscale, blackWhite, magicColor }
