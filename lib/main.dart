@@ -1,10 +1,9 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
-import 'dart:ui';
 
 import 'package:camera/camera.dart';
-import 'package:document_scanner/core/image_enhancer.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
@@ -14,21 +13,14 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
 import 'core/document_detector.dart';
+import 'core/image_enhancer.dart';
 import 'core/perspective_corrector.dart';
 import 'models/document_corners.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  List<CameraDescription> cameras = [];
-
-  try {
-    cameras = await availableCameras();
-  } catch (_) {
-    cameras = [];
-  }
-
-  runApp(DocumentScannerApp(cameras: cameras));
+  runApp(const DocumentScannerApp());
 }
 
 // ============================================================
@@ -36,49 +28,40 @@ Future<void> main() async {
 // ============================================================
 
 class DocumentScannerApp extends StatelessWidget {
-  final List<CameraDescription> cameras;
-
-  const DocumentScannerApp({super.key, required this.cameras});
+  const DocumentScannerApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'اسکنر سند',
-      theme: ThemeData(
-        useMaterial3: true,
-        colorSchemeSeed: Colors.teal,
-        fontFamily: 'Tahoma',
-      ),
-      home: ScannerPage(cameras: cameras),
+      theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.teal),
+      home: const ScannerPage(),
     );
   }
 }
 
 // ============================================================
-// SCANNED PAGE MODEL
+// SCAN ITEM
 // ============================================================
 
-class ScannedPage {
-  final String id;
+class ScanItem {
+  Uint8List originalBytes;
 
-  final Uint8List originalBytes;
-
-  final img.Image originalImage;
+  img.Image originalImage;
 
   DocumentCorners corners;
 
-  Uint8List? previewBytes;
+  Uint8List processedBytes;
 
-  Uint8List? finalBytes;
+  img.Image processedImage;
 
-  ScannedPage({
-    required this.id,
+  ScanItem({
     required this.originalBytes,
     required this.originalImage,
     required this.corners,
-    this.previewBytes,
-    this.finalBytes,
+    required this.processedBytes,
+    required this.processedImage,
   });
 }
 
@@ -87,9 +70,7 @@ class ScannedPage {
 // ============================================================
 
 class ScannerPage extends StatefulWidget {
-  final List<CameraDescription> cameras;
-
-  const ScannerPage({super.key, required this.cameras});
+  const ScannerPage({super.key});
 
   @override
   State<ScannerPage> createState() => _ScannerPageState();
@@ -102,29 +83,28 @@ class _ScannerPageState extends State<ScannerPage> {
 
   CameraController? _cameraController;
 
+  List<CameraDescription> _cameras = [];
+
   bool cameraAvailable = false;
-  bool cameraInitialized = false;
+
+  bool cameraInitializing = true;
+
+  bool takingPicture = false;
 
   // ==========================================================
-  // STATE
+  // SCANS
   // ==========================================================
 
-  bool processing = false;
-
-  String status = 'دوربین آماده نیست';
+  final List<ScanItem> scans = [];
 
   ScanFilter selectedFilter = ScanFilter.document;
 
-  // ==========================================================
-  // SCANNED PAGES
-  // ==========================================================
+  bool processing = false;
 
-  final List<ScannedPage> pages = [];
-
-  int? editingPageIndex;
+  String status = 'دوربین در حال آماده‌سازی است...';
 
   // ==========================================================
-  // CAMERA INITIALIZATION
+  // INIT
   // ==========================================================
 
   @override
@@ -134,58 +114,79 @@ class _ScannerPageState extends State<ScannerPage> {
     _initializeCamera();
   }
 
+  // ==========================================================
+  // CAMERA INIT
+  // ==========================================================
+
   Future<void> _initializeCamera() async {
-    if (widget.cameras.isEmpty) {
+    try {
       if (mounted) {
         setState(() {
-          cameraAvailable = false;
-          cameraInitialized = true;
-          status = 'دوربین در دسترس نیست؛ تصویر انتخاب کنید';
+          cameraInitializing = true;
+          status = 'در حال شناسایی دوربین...';
         });
       }
 
-      return;
-    }
+      _cameras = await availableCameras();
 
-    try {
-      CameraDescription selectedCamera = widget.cameras.first;
+      if (_cameras.isEmpty) {
+        if (!mounted) return;
 
-      // اولویت با دوربین پشت در موبایل
-      for (final camera in widget.cameras) {
+        setState(() {
+          cameraAvailable = false;
+          cameraInitializing = false;
+          status = 'دوربینی در دسترس نیست';
+        });
+
+        return;
+      }
+
+      // --------------------------------------------------------
+      // انتخاب دوربین پشت
+      // --------------------------------------------------------
+
+      CameraDescription selectedCamera = _cameras.first;
+
+      for (final camera in _cameras) {
         if (camera.lensDirection == CameraLensDirection.back) {
           selectedCamera = camera;
           break;
         }
       }
 
+      // --------------------------------------------------------
+      // Controller
+      // --------------------------------------------------------
+
       final controller = CameraController(
         selectedCamera,
         ResolutionPreset.max,
         enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.jpeg,
       );
-
-      await controller.initialize();
-
-      if (!mounted) {
-        await controller.dispose();
-        return;
-      }
 
       _cameraController = controller;
 
+      await controller.initialize();
+
+      if (!mounted) return;
+
       setState(() {
         cameraAvailable = true;
-        cameraInitialized = true;
-        status = 'دوربین آماده است';
+        cameraInitializing = false;
+
+        status = scans.isEmpty
+            ? 'سند را مقابل دوربین قرار دهید'
+            : '${scans.length} صفحه اسکن شده';
       });
     } catch (e) {
+      debugPrint('Camera initialization error: $e');
+
       if (!mounted) return;
 
       setState(() {
         cameraAvailable = false;
-        cameraInitialized = true;
-        status = 'دوربین در دسترس نیست؛ تصویر انتخاب کنید';
+        cameraInitializing = false;
+        status = 'دوربین در دسترس نیست؛ فایل انتخاب کنید';
       });
     }
   }
@@ -197,13 +198,29 @@ class _ScannerPageState extends State<ScannerPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: _buildAppBar(),
+      backgroundColor: Colors.black,
       body: SafeArea(
         child: Column(
           children: [
-            Expanded(child: _buildMainContent()),
+            // ==================================================
+            // TOP BAR
+            // ==================================================
+            _buildTopBar(),
 
-            _buildBottomPanel(),
+            // ==================================================
+            // CAMERA
+            // ==================================================
+            Expanded(child: _buildCameraArea()),
+
+            // ==================================================
+            // STATUS BAR
+            // ==================================================
+            _buildStatusBar(),
+
+            // ==================================================
+            // BOTTOM CONTROLS
+            // ==================================================
+            _buildBottomControls(),
           ],
         ),
       ),
@@ -211,389 +228,273 @@ class _ScannerPageState extends State<ScannerPage> {
   }
 
   // ==========================================================
-  // APP BAR
+  // TOP BAR
   // ==========================================================
 
-  PreferredSizeWidget _buildAppBar() {
-    return AppBar(
-      centerTitle: true,
-      title: const Text(
-        'اسکنر سند',
-        style: TextStyle(fontWeight: FontWeight.bold),
-      ),
-      actions: [
-        if (pages.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(left: 8),
-            child: Center(
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 6,
-                ),
-                decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.primary.withOpacity(.12),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Text(
-                  '${pages.length} صفحه',
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.primary,
-                    fontWeight: FontWeight.bold,
-                  ),
+  Widget _buildTopBar() {
+    return SizedBox(
+      height: 58,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        child: Row(
+          children: [
+            // --------------------------------------------------
+            // CLOSE
+            // --------------------------------------------------
+            _glassButton(
+              icon: Icons.close,
+              onPressed: () {
+                Navigator.of(context).maybePop();
+              },
+            ),
+
+            const Spacer(),
+
+            // --------------------------------------------------
+            // TITLE
+            // --------------------------------------------------
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(.08),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: Colors.white.withOpacity(.12)),
+              ),
+              child: Text(
+                scans.isEmpty ? 'اسکن سند' : '${scans.length} صفحه',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
                 ),
               ),
             ),
-          ),
-      ],
+
+            const Spacer(),
+
+            // --------------------------------------------------
+            // SETTINGS
+            // --------------------------------------------------
+            _glassButton(icon: Icons.settings_outlined, onPressed: () {}),
+          ],
+        ),
+      ),
     );
   }
 
   // ==========================================================
-  // MAIN CONTENT
+  // CAMERA AREA
   // ==========================================================
 
-  Widget _buildMainContent() {
-    if (editingPageIndex != null) {
-      return _buildEditor();
+  Widget _buildCameraArea() {
+    if (cameraInitializing) {
+      return Container(
+        width: double.infinity,
+        color: Colors.black,
+        child: const Center(
+          child: CircularProgressIndicator(color: Colors.white),
+        ),
+      );
     }
 
-    if (pages.isEmpty) {
-      return _buildCameraOrEmpty();
-    }
-
-    return _buildPreview();
-  }
-
-  // ==========================================================
-  // CAMERA / EMPTY
-  // ==========================================================
-
-  Widget _buildCameraOrEmpty() {
     if (cameraAvailable &&
-        cameraInitialized &&
         _cameraController != null &&
         _cameraController!.value.isInitialized) {
-      return _buildCamera();
+      return _buildCameraPreview();
     }
 
-    return _buildEmptyState();
+    return _buildFileFallback();
   }
 
   // ==========================================================
-  // CAMERA
+  // CAMERA PREVIEW
   // ==========================================================
 
-  Widget _buildCamera() {
+  Widget _buildCameraPreview() {
     final controller = _cameraController!;
 
-    return Column(
-      children: [
-        Expanded(
-          child: Container(
-            margin: const EdgeInsets.all(12),
-            clipBehavior: Clip.antiAlias,
-            decoration: BoxDecoration(
-              color: Colors.black,
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                CameraPreview(controller),
-
-                // تاریک کردن اطراف
-                IgnorePointer(
-                  child: CustomPaint(painter: CameraGuidePainter()),
-                ),
-
-                // راهنما
-                Positioned(
-                  left: 20,
-                  right: 20,
-                  top: 20,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 10,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.black54,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Text(
-                      'سند را داخل کادر قرار دهید',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.white, fontSize: 15),
-                    ),
-                  ),
-                ),
-
-                if (processing)
-                  Container(
-                    color: Colors.black45,
-                    child: const Center(
-                      child: CircularProgressIndicator(color: Colors.white),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  // ==========================================================
-  // EMPTY STATE
-  // ==========================================================
-
-  Widget _buildEmptyState() {
-    return Center(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.document_scanner_outlined,
-              size: 100,
-              color: Theme.of(context).colorScheme.primary,
-            ),
-
-            const SizedBox(height: 20),
-
-            const Text(
-              'اسکنر سند',
-              style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold),
-            ),
-
-            const SizedBox(height: 12),
-
-            Text(
-              'دوربین در دسترس نیست.\nمی‌توانید تصویر سند را از روی سیستم انتخاب کنید.',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.grey.shade700),
-            ),
-
-            const SizedBox(height: 30),
-
-            FilledButton.icon(
-              onPressed: processing ? null : pickImage,
-              icon: const Icon(Icons.folder_open),
-              label: const Text('انتخاب تصویر'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // ==========================================================
-  // PREVIEW
-  // ==========================================================
-
-  Widget _buildPreview() {
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-          child: Row(
-            children: [
-              const Expanded(
-                child: Text(
-                  'پیش‌نمایش اسکن',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-              ),
-
-              Text(
-                '${pages.length} صفحه',
-                style: TextStyle(color: Colors.grey.shade700),
-              ),
-            ],
-          ),
-        ),
-
-        Expanded(
-          child: GridView.builder(
-            padding: const EdgeInsets.all(12),
-            gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-              maxCrossAxisExtent: 260,
-              crossAxisSpacing: 12,
-              mainAxisSpacing: 12,
-              childAspectRatio: .72,
-            ),
-            itemCount: pages.length,
-            itemBuilder: (context, index) {
-              return _buildPageCard(index);
-            },
-          ),
-        ),
-      ],
-    );
-  }
-
-  // ==========================================================
-  // PAGE CARD
-  // ==========================================================
-
-  Widget _buildPageCard(int index) {
-    final page = pages[index];
-
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      elevation: 3,
-      child: InkWell(
-        onTap: processing
-            ? null
-            : () {
-                _openEditor(index);
-              },
-        child: Stack(
-          children: [
-            Positioned.fill(
-              child: Container(
-                color: Colors.grey.shade100,
-                padding: const EdgeInsets.all(8),
-                child: page.previewBytes != null
-                    ? Image.memory(
-                        page.previewBytes!,
-                        fit: BoxFit.contain,
-                        filterQuality: FilterQuality.high,
-                      )
-                    : const Center(child: CircularProgressIndicator()),
-              ),
-            ),
-
-            // شماره صفحه
-            Positioned(
-              top: 10,
-              right: 10,
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 5,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(.7),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Text(
-                  '${index + 1}',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-            ),
-
-            // حذف
-            Positioned(
-              top: 4,
-              left: 4,
-              child: Material(
-                color: Colors.black54,
-                shape: const CircleBorder(),
-                child: IconButton(
-                  tooltip: 'حذف',
-                  icon: const Icon(Icons.close, color: Colors.white),
-                  onPressed: () {
-                    _removePage(index);
-                  },
-                ),
-              ),
-            ),
-
-            // ویرایش
-            Positioned(
-              bottom: 8,
-              left: 8,
-              right: 8,
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  vertical: 8,
-                  horizontal: 10,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(.65),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: const Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.crop, size: 17, color: Colors.white),
-                    SizedBox(width: 6),
-                    Text(
-                      'ویرایش برش',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // ==========================================================
-  // BOTTOM PANEL
-  // ==========================================================
-
-  Widget _buildBottomPanel() {
     return Container(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-      decoration: BoxDecoration(
-        color: Theme.of(context).scaffoldBackgroundColor,
-        boxShadow: const [BoxShadow(blurRadius: 12, color: Colors.black12)],
+      width: double.infinity,
+      color: Colors.black,
+      alignment: Alignment.center,
+      child: FittedBox(
+        fit: BoxFit.contain,
+        child: SizedBox(
+          width:
+              controller.value.previewSize?.height ??
+              MediaQuery.of(context).size.width,
+          height:
+              controller.value.previewSize?.width ??
+              MediaQuery.of(context).size.height,
+          child: CameraPreview(controller),
+        ),
       ),
-      child: Column(
-        children: [
-          if (status.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Text(
-                status,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                textAlign: TextAlign.center,
-              ),
-            ),
+    );
+  }
 
-          Row(
+  // ==========================================================
+  // FILE FALLBACK
+  // ==========================================================
+
+  Widget _buildFileFallback() {
+    return Container(
+      width: double.infinity,
+      color: const Color(0xff111111),
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(30),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              // انتخاب فایل
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: processing ? null : pickImage,
-                  icon: const Icon(Icons.folder_open),
-                  label: const Text('انتخاب فایل'),
+              Container(
+                width: 100,
+                height: 100,
+                decoration: BoxDecoration(
+                  color: Colors.teal.withOpacity(.12),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.document_scanner_outlined,
+                  size: 55,
+                  color: Colors.teal,
                 ),
               ),
 
-              const SizedBox(width: 10),
+              const SizedBox(height: 20),
 
-              // دوربین / شاتر
-              if (cameraAvailable) _buildShutterButton(),
-
-              if (cameraAvailable) const SizedBox(width: 10),
-
-              // ذخیره
-              if (pages.isNotEmpty)
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: processing ? null : saveAll,
-                    icon: const Icon(Icons.save),
-                    label: const Text('ذخیره'),
-                  ),
+              const Text(
+                'دوربین در دسترس نیست',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
                 ),
+              ),
+
+              const SizedBox(height: 8),
+
+              const Text(
+                'تصویر سند را از کامپیوتر انتخاب کنید',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white70, fontSize: 14),
+              ),
+
+              const SizedBox(height: 22),
+
+              FilledButton.icon(
+                onPressed: processing ? null : pickImages,
+                icon: const Icon(Icons.folder_open),
+                label: const Text('انتخاب تصویر'),
+              ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ==========================================================
+  // STATUS BAR
+  // ==========================================================
+
+  Widget _buildStatusBar() {
+    return Container(
+      width: double.infinity,
+      constraints: const BoxConstraints(minHeight: 42, maxHeight: 52),
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 7),
+      decoration: BoxDecoration(
+        color: const Color(0xff101010),
+        border: Border(
+          top: BorderSide(color: Colors.white.withOpacity(.08)),
+          bottom: BorderSide(color: Colors.white.withOpacity(.08)),
+        ),
+      ),
+      child: Center(
+        child: Text(
+          status,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.center,
+          style: const TextStyle(color: Colors.white70, fontSize: 13),
+        ),
+      ),
+    );
+  }
+
+  // ==========================================================
+  // BOTTOM CONTROLS
+  // ==========================================================
+
+  Widget _buildBottomControls() {
+    return Container(
+      width: double.infinity,
+      height: 112,
+      color: const Color(0xff080808),
+      padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          // ====================================================
+          // FILE PICKER
+          // ====================================================
+          Expanded(
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: _buildFileButton(),
+            ),
+          ),
+
+          // ====================================================
+          // SHUTTER
+          // ====================================================
+          Expanded(child: Center(child: _buildShutterButton())),
+
+          // ====================================================
+          // SCAN STACK
+          // ====================================================
+          Expanded(
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: scans.isEmpty
+                  ? const SizedBox(width: 78, height: 78)
+                  : _buildScanStack(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ==========================================================
+  // FILE BUTTON
+  // ==========================================================
+
+  Widget _buildFileButton() {
+    return GestureDetector(
+      onTap: processing ? null : pickImages,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 58,
+            height: 58,
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(.08),
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white24, width: 1),
+            ),
+            child: const Icon(
+              Icons.photo_library_outlined,
+              color: Colors.white,
+              size: 27,
+            ),
+          ),
+
+          const SizedBox(height: 4),
+
+          const Text(
+            'فایل',
+            style: TextStyle(color: Colors.white70, fontSize: 11),
           ),
         ],
       ),
@@ -606,25 +507,173 @@ class _ScannerPageState extends State<ScannerPage> {
 
   Widget _buildShutterButton() {
     return GestureDetector(
-      onTap: processing ? null : capturePhoto,
-      child: Container(
-        width: 64,
-        height: 64,
+      onTap: cameraAvailable && !takingPicture && !processing
+          ? capturePhoto
+          : null,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        width: 78,
+        height: 78,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color: Theme.of(context).colorScheme.primary,
-          border: Border.all(color: Colors.white, width: 4),
-          boxShadow: const [BoxShadow(blurRadius: 8, color: Colors.black26)],
+          color: cameraAvailable ? Colors.white : Colors.white24,
+          border: Border.all(color: Colors.white70, width: 4),
+          boxShadow: const [
+            BoxShadow(color: Colors.black54, blurRadius: 12, spreadRadius: 2),
+          ],
         ),
-        child: processing
+        child: takingPicture
             ? const Padding(
-                padding: EdgeInsets.all(17),
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: Colors.white,
-                ),
+                padding: EdgeInsets.all(23),
+                child: CircularProgressIndicator(strokeWidth: 3),
               )
-            : const Icon(Icons.camera_alt, color: Colors.white, size: 28),
+            : Icon(
+                Icons.camera_alt,
+                color: cameraAvailable ? Colors.black87 : Colors.white38,
+                size: 32,
+              ),
+      ),
+    );
+  }
+
+  // ==========================================================
+  // SCAN STACK
+  // ==========================================================
+
+  Widget _buildScanStack() {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: processing
+          ? null
+          : () {
+              _openSavePreview();
+            },
+      child: SizedBox(
+        width: 86,
+        height: 82,
+        child: Stack(
+          clipBehavior: Clip.none,
+          alignment: Alignment.center,
+          children: [
+            // --------------------------------------------------
+            // BACK IMAGE 1
+            // --------------------------------------------------
+            if (scans.length >= 3)
+              Positioned(
+                left: 0,
+                top: 8,
+                child: _thumbnailCard(
+                  scans[scans.length - 3],
+                  53,
+                  65,
+                  rotation: -.10,
+                ),
+              ),
+
+            // --------------------------------------------------
+            // BACK IMAGE 2
+            // --------------------------------------------------
+            if (scans.length >= 2)
+              Positioned(
+                left: 8,
+                top: 4,
+                child: _thumbnailCard(
+                  scans[scans.length - 2],
+                  57,
+                  69,
+                  rotation: -.05,
+                ),
+              ),
+
+            // --------------------------------------------------
+            // LAST IMAGE
+            // --------------------------------------------------
+            Positioned(
+              left: 17,
+              top: 0,
+              child: _thumbnailCard(scans.last, 61, 74),
+            ),
+
+            // --------------------------------------------------
+            // COUNT
+            // --------------------------------------------------
+            Positioned(
+              right: -4,
+              bottom: -2,
+              child: Container(
+                width: 31,
+                height: 31,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.teal,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white, width: 2),
+                  boxShadow: const [
+                    BoxShadow(color: Colors.black54, blurRadius: 5),
+                  ],
+                ),
+                child: Text(
+                  '${scans.length}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ==========================================================
+  // THUMBNAIL
+  // ==========================================================
+
+  Widget _thumbnailCard(
+    ScanItem item,
+    double width,
+    double height, {
+    double rotation = 0,
+  }) {
+    return Transform.rotate(
+      angle: rotation,
+      child: Container(
+        width: width,
+        height: height,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(7),
+          border: Border.all(color: Colors.white, width: 2),
+          boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 8)],
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Image.memory(item.processedBytes, fit: BoxFit.cover),
+      ),
+    );
+  }
+
+  // ==========================================================
+  // GLASS BUTTON
+  // ==========================================================
+
+  Widget _glassButton({
+    required IconData icon,
+    required VoidCallback onPressed,
+  }) {
+    return Container(
+      width: 44,
+      height: 44,
+      decoration: BoxDecoration(
+        color: Colors.black54,
+        shape: BoxShape.circle,
+        border: Border.all(color: Colors.white24),
+      ),
+      child: IconButton(
+        onPressed: onPressed,
+        icon: Icon(icon, color: Colors.white, size: 21),
       ),
     );
   }
@@ -634,21 +683,16 @@ class _ScannerPageState extends State<ScannerPage> {
   // ==========================================================
 
   Future<void> capturePhoto() async {
-    if (_cameraController == null) {
-      return;
-    }
-
-    if (!_cameraController!.value.isInitialized) {
-      return;
-    }
-
-    if (processing) {
+    if (_cameraController == null ||
+        !_cameraController!.value.isInitialized ||
+        takingPicture ||
+        processing) {
       return;
     }
 
     try {
       setState(() {
-        processing = true;
+        takingPicture = true;
         status = 'در حال گرفتن تصویر...';
       });
 
@@ -656,68 +700,61 @@ class _ScannerPageState extends State<ScannerPage> {
 
       final bytes = await file.readAsBytes();
 
-      await _processImage(bytes);
+      await _processAndAddImage(bytes);
     } catch (e) {
+      debugPrint('Capture error: $e');
+
       if (!mounted) return;
 
       setState(() {
-        processing = false;
-        status = 'خطا در گرفتن تصویر: $e';
+        status = 'خطا در گرفتن تصویر';
       });
+    } finally {
+      if (mounted) {
+        setState(() {
+          takingPicture = false;
+        });
+      }
     }
   }
 
   // ==========================================================
-  // PICK IMAGE
+  // PICK IMAGES
   // ==========================================================
 
-  Future<void> pickImage() async {
-    if (processing) {
-      return;
-    }
+  Future<void> pickImages() async {
+    if (processing) return;
 
     try {
-      setState(() {
-        processing = true;
-        status = 'در حال انتخاب تصویر...';
-      });
-
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['jpg', 'jpeg', 'png', 'webp', 'bmp'],
+        allowMultiple: true,
         withData: true,
       );
 
-      if (result == null) {
-        if (!mounted) return;
-
-        setState(() {
-          processing = false;
-          status = pages.isEmpty ? 'تصویری انتخاب نشد' : 'آماده اسکن صفحه بعدی';
-        });
-
+      if (result == null || result.files.isEmpty) {
         return;
       }
 
-      final selected = result.files.single;
+      for (final selected in result.files) {
+        Uint8List? bytes = selected.bytes;
 
-      Uint8List? bytes = selected.bytes;
+        if (bytes == null && selected.path != null) {
+          bytes = await File(selected.path!).readAsBytes();
+        }
 
-      if (bytes == null && selected.path != null) {
-        bytes = await File(selected.path!).readAsBytes();
+        if (bytes == null) {
+          continue;
+        }
+
+        await _processAndAddImage(bytes);
       }
-
-      if (bytes == null) {
-        throw Exception('خواندن فایل ممکن نیست');
-      }
-
-      await _processImage(bytes);
     } catch (e) {
       if (!mounted) return;
 
       setState(() {
-        processing = false;
-        status = 'خطا: $e';
+        status = 'خطا در انتخاب تصویر: $e';
       });
     }
   }
@@ -726,12 +763,16 @@ class _ScannerPageState extends State<ScannerPage> {
   // PROCESS IMAGE
   // ==========================================================
 
-  Future<void> _processImage(Uint8List bytes) async {
+  Future<void> _processAndAddImage(Uint8List bytes) async {
     try {
       setState(() {
         processing = true;
-        status = 'در حال آماده‌سازی تصویر...';
+        status = 'در حال تشخیص و برش سند...';
       });
+
+      // ------------------------------------------------------
+      // Decode
+      // ------------------------------------------------------
 
       final decoded = img.decodeImage(bytes);
 
@@ -739,43 +780,64 @@ class _ScannerPageState extends State<ScannerPage> {
         throw Exception('فرمت تصویر قابل تشخیص نیست');
       }
 
+      // ------------------------------------------------------
       // EXIF
+      // ------------------------------------------------------
+
       final fixed = img.bakeOrientation(decoded);
 
       final fixedBytes = Uint8List.fromList(img.encodeJpg(fixed, quality: 95));
 
-      setState(() {
-        status = 'در حال تشخیص برگه...';
-      });
-
-      await Future.delayed(const Duration(milliseconds: 30));
+      // ------------------------------------------------------
+      // Detect
+      // ------------------------------------------------------
 
       final detected = await Future(() {
         return DocumentDetector.detect(fixed);
       });
 
-      final documentCorners = detected ?? _defaultCorners(fixed);
+      final detectedCorners = detected ?? _defaultCorners(fixed);
 
-      final page = ScannedPage(
-        id: DateTime.now().microsecondsSinceEpoch.toString(),
-        originalBytes: fixedBytes,
-        originalImage: fixed,
-        corners: documentCorners,
-      );
+      // ------------------------------------------------------
+      // Perspective
+      // ------------------------------------------------------
 
-      // بلافاصله پیش‌نمایش برش‌خورده
-      setState(() {
-        pages.add(page);
-        status = 'صفحه ${pages.length} آماده است';
+      final rectified = await Future(() {
+        return PerspectiveCorrector.rectify(fixed, detectedCorners);
       });
 
-      await _generatePreview(page);
+      // ------------------------------------------------------
+      // Enhancement
+      // ------------------------------------------------------
+
+      final enhanced = await Future(() {
+        return ImageEnhancer.apply(rectified, selectedFilter);
+      });
+
+      final processedBytes = Uint8List.fromList(
+        img.encodeJpg(enhanced, quality: 100),
+      );
+
+      // ------------------------------------------------------
+      // Add
+      // ------------------------------------------------------
 
       if (!mounted) return;
 
       setState(() {
+        scans.add(
+          ScanItem(
+            originalBytes: fixedBytes,
+            originalImage: fixed,
+            corners: detectedCorners,
+            processedBytes: processedBytes,
+            processedImage: enhanced,
+          ),
+        );
+
         processing = false;
-        status = 'صفحه ${pages.length} اضافه شد؛ برای اصلاح روی تصویر بزنید';
+
+        status = '${scans.length} صفحه آماده است';
       });
     } catch (e) {
       if (!mounted) return;
@@ -788,66 +850,195 @@ class _ScannerPageState extends State<ScannerPage> {
   }
 
   // ==========================================================
-  // GENERATE PREVIEW
+  // DEFAULT CORNERS
   // ==========================================================
 
-  Future<void> _generatePreview(ScannedPage page) async {
-    final result = await Future(() {
-      return PerspectiveCorrector.rectify(page.originalImage, page.corners);
-    });
+  DocumentCorners _defaultCorners(img.Image image) {
+    final marginX = image.width * .08;
+    final marginY = image.height * .08;
 
-    final enhanced = await Future(() {
-      return ImageEnhancer.apply(result, selectedFilter);
-    });
-
-    final jpg = Uint8List.fromList(img.encodeJpg(enhanced, quality: 95));
-
-    page.previewBytes = jpg;
-    page.finalBytes = jpg;
-
-    if (mounted) {
-      setState(() {});
-    }
+    return DocumentCorners(
+      topLeft: Offset(marginX, marginY),
+      topRight: Offset(image.width - marginX, marginY),
+      bottomRight: Offset(image.width - marginX, image.height - marginY),
+      bottomLeft: Offset(marginX, image.height - marginY),
+    );
   }
 
   // ==========================================================
-  // OPEN EDITOR
+  // OPEN SAVE PREVIEW
   // ==========================================================
 
-  void _openEditor(int index) {
-    if (index < 0 || index >= pages.length) {
+  Future<void> _openSavePreview() async {
+    if (scans.isEmpty || processing) {
+      return;
+    }
+
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => SavePreviewPage(
+          scans: scans,
+          onEdit: _editScan,
+          onDelete: _deleteScan,
+        ),
+      ),
+    );
+
+    if (!mounted) return;
+
+    setState(() {
+      status = scans.isEmpty
+          ? 'سند را مقابل دوربین قرار دهید'
+          : '${scans.length} صفحه آماده است';
+    });
+  }
+
+  // ==========================================================
+  // EDIT SCAN
+  // ==========================================================
+
+  Future<void> _editScan(int index) async {
+    if (index < 0 || index >= scans.length) {
+      return;
+    }
+
+    final item = scans[index];
+
+    final result = await Navigator.of(context).push<ScanItem>(
+      MaterialPageRoute(
+        builder: (_) => CropEditorPage(item: item, filter: selectedFilter),
+      ),
+    );
+
+    if (result == null || !mounted) {
       return;
     }
 
     setState(() {
-      editingPageIndex = index;
-      status = 'گوشه‌های سند را جابه‌جا کنید';
+      scans[index] = result;
+
+      status = '${scans.length} صفحه آماده است';
     });
+  }
+
+  // ==========================================================
+  // DELETE SCAN
+  // ==========================================================
+
+  void _deleteScan(int index) {
+    if (index < 0 || index >= scans.length) {
+      return;
+    }
+
+    setState(() {
+      scans.removeAt(index);
+
+      status = scans.isEmpty
+          ? 'سند را مقابل دوربین قرار دهید'
+          : '${scans.length} صفحه آماده است';
+    });
+  }
+
+  // ==========================================================
+  // DISPOSE
+  // ==========================================================
+
+  @override
+  void dispose() {
+    _cameraController?.dispose();
+
+    super.dispose();
+  }
+}
+
+// ============================================================
+// CROP EDITOR PAGE
+// ============================================================
+
+class CropEditorPage extends StatefulWidget {
+  final ScanItem item;
+
+  final ScanFilter filter;
+
+  const CropEditorPage({super.key, required this.item, required this.filter});
+
+  @override
+  State<CropEditorPage> createState() => _CropEditorPageState();
+}
+
+class _CropEditorPageState extends State<CropEditorPage> {
+  late DocumentCorners corners;
+
+  late img.Image image;
+
+  bool processing = false;
+
+  int? activeCorner;
+
+  static const double zoomSize = 135;
+
+  static const double zoomFactor = 4;
+
+  @override
+  void initState() {
+    super.initState();
+
+    image = widget.item.originalImage;
+    corners = widget.item.corners.copy();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        title: const Text('تنظیم برش'),
+        actions: [
+          TextButton.icon(
+            onPressed: processing ? null : _applyChanges,
+            icon: const Icon(Icons.check),
+            label: const Text('اعمال'),
+          ),
+        ],
+      ),
+
+      body: processing
+          ? const Center(child: CircularProgressIndicator(color: Colors.white))
+          : _editor(),
+
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Text(
+            'گوشه‌های سند را جابه‌جا کنید',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.white.withOpacity(.8)),
+          ),
+        ),
+      ),
+    );
   }
 
   // ==========================================================
   // EDITOR
   // ==========================================================
 
-  Widget _buildEditor() {
-    if (editingPageIndex == null) {
-      return const SizedBox.shrink();
-    }
-
-    final page = pages[editingPageIndex!];
-
+  Widget _editor() {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final imageWidth = page.originalImage.width.toDouble();
+        final imageWidth = image.width.toDouble();
 
-        final imageHeight = page.originalImage.height.toDouble();
+        final imageHeight = image.height.toDouble();
 
-        double displayWidth = constraints.maxWidth - 24;
+        double displayWidth = constraints.maxWidth;
 
         double displayHeight = displayWidth * imageHeight / imageWidth;
 
-        if (displayHeight > constraints.maxHeight - 100) {
-          displayHeight = constraints.maxHeight - 100;
+        if (displayHeight > constraints.maxHeight) {
+          displayHeight = constraints.maxHeight;
 
           displayWidth = displayHeight * imageWidth / imageHeight;
         }
@@ -858,149 +1049,113 @@ class _ScannerPageState extends State<ScannerPage> {
 
         final displayCorners = DocumentCorners(
           topLeft: Offset(
-            page.corners.topLeft.dx * scaleX,
-            page.corners.topLeft.dy * scaleY,
+            corners.topLeft.dx * scaleX,
+            corners.topLeft.dy * scaleY,
           ),
           topRight: Offset(
-            page.corners.topRight.dx * scaleX,
-            page.corners.topRight.dy * scaleY,
+            corners.topRight.dx * scaleX,
+            corners.topRight.dy * scaleY,
           ),
           bottomRight: Offset(
-            page.corners.bottomRight.dx * scaleX,
-            page.corners.bottomRight.dy * scaleY,
+            corners.bottomRight.dx * scaleX,
+            corners.bottomRight.dy * scaleY,
           ),
           bottomLeft: Offset(
-            page.corners.bottomLeft.dx * scaleX,
-            page.corners.bottomLeft.dy * scaleY,
+            corners.bottomLeft.dx * scaleX,
+            corners.bottomLeft.dy * scaleY,
           ),
         );
 
-        return Column(
-          children: [
-            // Header
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-              child: Row(
-                children: [
-                  IconButton(
-                    tooltip: 'بازگشت',
-                    onPressed: processing
-                        ? null
-                        : () {
-                            setState(() {
-                              editingPageIndex = null;
-                              status = 'برای افزودن صفحه جدید، عکس بگیرید';
-                            });
-                          },
-                    icon: const Icon(Icons.arrow_back),
-                  ),
-
-                  const Expanded(
-                    child: Text(
-                      'اصلاح برش',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 18,
-                      ),
-                    ),
-                  ),
-
-                  FilledButton.icon(
-                    onPressed: processing ? null : () => _applyEditor(page),
-                    icon: const Icon(Icons.check),
-                    label: const Text('اعمال'),
-                  ),
-                ],
-              ),
-            ),
-
-            Expanded(
-              child: Center(
-                child: SizedBox(
-                  width: displayWidth,
-                  height: displayHeight,
-                  child: Stack(
-                    clipBehavior: Clip.none,
-                    children: [
-                      // IMAGE
-                      Positioned.fill(
-                        child: Image.memory(
-                          page.originalBytes,
-                          fit: BoxFit.fill,
-                          filterQuality: FilterQuality.high,
-                        ),
-                      ),
-
-                      // DOCUMENT
-                      Positioned.fill(
-                        child: CustomPaint(
-                          painter: DocumentPainter(displayCorners),
-                        ),
-                      ),
-
-                      // HANDLES
-                      ..._editorHandles(page, displayCorners, scaleX, scaleY),
-                    ],
+        return Center(
+          child: SizedBox(
+            width: displayWidth,
+            height: displayHeight,
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Positioned.fill(
+                  child: Image.memory(
+                    widget.item.originalBytes,
+                    fit: BoxFit.fill,
                   ),
                 ),
-              ),
-            ),
 
-            const SizedBox(height: 8),
+                Positioned.fill(
+                  child: CustomPaint(painter: DocumentPainter(displayCorners)),
+                ),
 
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Text(
-                'نقاط گوشه‌های سند را جابه‌جا کنید',
-                style: TextStyle(color: Colors.grey.shade700),
-              ),
+                ..._handles(displayCorners, scaleX, scaleY),
+
+                if (activeCorner != null)
+                  _buildZoom(
+                    displayCorners,
+                    scaleX,
+                    scaleY,
+                    displayWidth,
+                    displayHeight,
+                  ),
+              ],
             ),
-          ],
+          ),
         );
       },
     );
   }
 
   // ==========================================================
-  // EDITOR HANDLES
+  // HANDLES
   // ==========================================================
 
-  List<Widget> _editorHandles(
-    ScannedPage page,
-    DocumentCorners displayCorners,
-    double scaleX,
-    double scaleY,
-  ) {
-    final points = displayCorners.points;
+  List<Widget> _handles(DocumentCorners c, double scaleX, double scaleY) {
+    final points = [c.topLeft, c.topRight, c.bottomRight, c.bottomLeft];
 
     return List.generate(points.length, (index) {
       final point = points[index];
 
+      final isActive = activeCorner == index;
+
       return Positioned(
-        left: point.dx - 25,
-        top: point.dy - 25,
+        left: point.dx - 23,
+        top: point.dy - 23,
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
+
+          onPanStart: (_) {
+            setState(() {
+              activeCorner = index;
+            });
+          },
+
           onPanUpdate: (details) {
             _moveCorner(
-              page,
               index,
               Offset(details.delta.dx / scaleX, details.delta.dy / scaleY),
             );
           },
-          child: Container(
-            width: 50,
-            height: 50,
+
+          onPanEnd: (_) {
+            setState(() {
+              activeCorner = null;
+            });
+          },
+
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 100),
+            width: isActive ? 52 : 46,
+            height: isActive ? 52 : 46,
             decoration: BoxDecoration(
-              color: Colors.teal,
+              color: isActive ? Colors.orange : Colors.teal,
               shape: BoxShape.circle,
-              border: Border.all(color: Colors.white, width: 3),
+              border: Border.all(color: Colors.white, width: 2),
               boxShadow: const [
-                BoxShadow(color: Colors.black45, blurRadius: 8),
+                BoxShadow(color: Colors.black45, blurRadius: 7),
               ],
             ),
-            child: const Icon(Icons.open_with, color: Colors.white),
+            child: Icon(
+              Icons.open_with,
+              color: Colors.white,
+              size: isActive ? 25 : 22,
+            ),
           ),
         ),
       );
@@ -1011,8 +1166,8 @@ class _ScannerPageState extends State<ScannerPage> {
   // MOVE CORNER
   // ==========================================================
 
-  void _moveCorner(ScannedPage page, int index, Offset delta) {
-    final c = page.corners.copy();
+  void _moveCorner(int index, Offset delta) {
+    final c = corners.copy();
 
     Offset updated;
 
@@ -1038,8 +1193,8 @@ class _ScannerPageState extends State<ScannerPage> {
     }
 
     updated = Offset(
-      updated.dx.clamp(0, page.originalImage.width.toDouble()),
-      updated.dy.clamp(0, page.originalImage.height.toDouble()),
+      updated.dx.clamp(0, image.width.toDouble()),
+      updated.dy.clamp(0, image.height.toDouble()),
     );
 
     switch (index) {
@@ -1060,134 +1215,355 @@ class _ScannerPageState extends State<ScannerPage> {
         break;
     }
 
-    page.corners = c;
-
-    setState(() {});
+    setState(() {
+      corners = c;
+    });
   }
 
   // ==========================================================
-  // APPLY EDITOR
+  // ZOOM
   // ==========================================================
 
-  Future<void> _applyEditor(ScannedPage page) async {
+  Widget _buildZoom(
+    DocumentCorners displayCorners,
+    double scaleX,
+    double scaleY,
+    double displayWidth,
+    double displayHeight,
+  ) {
+    if (activeCorner == null) {
+      return const SizedBox.shrink();
+    }
+
+    final originalPoint = corners.points[activeCorner!];
+
+    final displayPoint = Offset(
+      originalPoint.dx * scaleX,
+      originalPoint.dy * scaleY,
+    );
+
+    double left;
+
+    double top;
+
+    if (displayPoint.dx < displayWidth / 2) {
+      left = displayPoint.dx + 38;
+    } else {
+      left = displayPoint.dx - zoomSize - 38;
+    }
+
+    if (displayPoint.dy < displayHeight / 2) {
+      top = displayPoint.dy + 38;
+    } else {
+      top = displayPoint.dy - zoomSize - 38;
+    }
+
+    left = left.clamp(0, math.max(0, displayWidth - zoomSize));
+
+    top = top.clamp(0, math.max(0, displayHeight - zoomSize));
+
+    return Positioned(
+      left: left,
+      top: top,
+      child: _ZoomPreview(
+        image: image,
+        point: originalPoint,
+        size: zoomSize,
+        zoom: zoomFactor,
+      ),
+    );
+  }
+
+  // ==========================================================
+  // APPLY
+  // ==========================================================
+
+  Future<void> _applyChanges() async {
     try {
       setState(() {
         processing = true;
-        status = 'در حال اعمال برش...';
       });
 
-      await _generatePreview(page);
+      final rectified = await Future(() {
+        return PerspectiveCorrector.rectify(image, corners);
+      });
+
+      final enhanced = await Future(() {
+        return ImageEnhancer.apply(rectified, widget.filter);
+      });
+
+      final bytes = Uint8List.fromList(img.encodeJpg(enhanced, quality: 100));
+
+      final updated = ScanItem(
+        originalBytes: widget.item.originalBytes,
+        originalImage: image,
+        corners: corners,
+        processedBytes: bytes,
+        processedImage: enhanced,
+      );
 
       if (!mounted) return;
 
-      setState(() {
-        processing = false;
-        editingPageIndex = null;
-        status = 'برش اعمال شد؛ برای ادامه عکس بگیرید';
-      });
+      Navigator.of(context).pop(updated);
     } catch (e) {
       if (!mounted) return;
 
       setState(() {
         processing = false;
-        status = 'خطا در اعمال برش: $e';
       });
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('خطا در اعمال برش: $e')));
     }
   }
+}
 
-  // ==========================================================
-  // REMOVE PAGE
-  // ==========================================================
+// ============================================================
+// SAVE PREVIEW PAGE
+// ============================================================
 
-  void _removePage(int index) {
-    if (index < 0 || index >= pages.length) {
-      return;
-    }
+class SavePreviewPage extends StatefulWidget {
+  final List<ScanItem> scans;
 
-    setState(() {
-      pages.removeAt(index);
+  final Future<void> Function(int index) onEdit;
 
-      if (pages.isEmpty) {
-        status = cameraAvailable ? 'آماده گرفتن تصویر' : 'تصویر انتخاب کنید';
-      } else {
-        status = '${pages.length} صفحه آماده است';
-      }
-    });
+  final void Function(int index) onDelete;
+
+  const SavePreviewPage({
+    super.key,
+    required this.scans,
+    required this.onEdit,
+    required this.onDelete,
+  });
+
+  @override
+  State<SavePreviewPage> createState() => _SavePreviewPageState();
+}
+
+class _SavePreviewPageState extends State<SavePreviewPage> {
+  late TextEditingController nameController;
+
+  bool saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+
+    nameController = TextEditingController(text: _defaultFileName());
   }
 
-  // ==========================================================
-  // DEFAULT CORNERS
-  // ==========================================================
+  String _defaultFileName() {
+    final now = DateTime.now();
 
-  DocumentCorners _defaultCorners(img.Image image) {
-    final marginX = image.width * .08;
-    final marginY = image.height * .08;
+    String two(int value) => value.toString().padLeft(2, '0');
 
-    return DocumentCorners(
-      topLeft: Offset(marginX, marginY),
-      topRight: Offset(image.width - marginX, marginY),
-      bottomRight: Offset(image.width - marginX, image.height - marginY),
-      bottomLeft: Offset(marginX, image.height - marginY),
-    );
+    return 'scan_${now.year}'
+        '${two(now.month)}'
+        '${two(now.day)}_'
+        '${two(now.hour)}'
+        '${two(now.minute)}'
+        '${two(now.second)}';
   }
 
-  // ==========================================================
-  // SAVE ALL
-  // ==========================================================
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('پیش‌نمایش و ذخیره')),
 
-  Future<void> saveAll() async {
-    if (pages.isEmpty) {
-      return;
-    }
-
-    final defaultName = _defaultFileName();
-
-    final nameController = TextEditingController(text: defaultName);
-
-    final fileName = await showDialog<String>(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('ذخیره اسکن'),
-          content: TextField(
-            controller: nameController,
-            autofocus: true,
-            textDirection: TextDirection.ltr,
-            decoration: InputDecoration(
-              labelText: 'نام فایل',
-              hintText: defaultName,
-              border: const OutlineInputBorder(),
+      body: Column(
+        children: [
+          // ----------------------------------------------------
+          // FILE NAME
+          // ----------------------------------------------------
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
+            child: TextField(
+              controller: nameController,
+              textDirection: TextDirection.ltr,
+              decoration: InputDecoration(
+                labelText: 'نام فایل',
+                prefixIcon: const Icon(Icons.edit),
+                suffixText: widget.scans.length == 1 ? '.jpg' : '.pdf',
+                border: const OutlineInputBorder(),
+              ),
             ),
           ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.pop(context);
-              },
-              child: const Text('انصراف'),
+
+          // ----------------------------------------------------
+          // INFO
+          // ----------------------------------------------------
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+            child: Row(
+              children: [
+                Text(
+                  '${widget.scans.length} صفحه',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                const Spacer(),
+                Text(
+                  widget.scans.length == 1 ? 'JPG' : 'PDF',
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.primary,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
             ),
-            FilledButton(
-              onPressed: () {
-                Navigator.pop(context, nameController.text.trim());
+          ),
+
+          // ----------------------------------------------------
+          // PREVIEW
+          // ----------------------------------------------------
+          Expanded(
+            child: ListView.builder(
+              padding: const EdgeInsets.all(12),
+              itemCount: widget.scans.length,
+              itemBuilder: (context, index) {
+                final scan = widget.scans[index];
+
+                return _buildPreviewItem(index, scan);
               },
-              child: const Text('ذخیره'),
             ),
-          ],
-        );
-      },
+          ),
+        ],
+      ),
+
+      // --------------------------------------------------------
+      // SAVE BUTTON
+      // --------------------------------------------------------
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: FilledButton.icon(
+            onPressed: saving ? null : _save,
+            icon: saving
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : const Icon(Icons.save),
+            label: Text(saving ? 'در حال ذخیره...' : 'ذخیره'),
+          ),
+        ),
+      ),
     );
+  }
 
-    nameController.dispose();
+  // ==========================================================
+  // PREVIEW ITEM
+  // ==========================================================
 
-    if (fileName == null || fileName.trim().isEmpty) {
-      return;
-    }
+  Widget _buildPreviewItem(int index, ScanItem scan) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () async {
+          await widget.onEdit(index);
+
+          if (mounted) {
+            setState(() {});
+          }
+        },
+        child: SizedBox(
+          height: 190,
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: Image.memory(scan.processedBytes, fit: BoxFit.contain),
+              ),
+
+              // ------------------------------------------------
+              // PAGE NUMBER
+              // ------------------------------------------------
+              Positioned(
+                top: 8,
+                left: 8,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black,
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Text(
+                    'صفحه ${index + 1}',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ),
+
+              // ------------------------------------------------
+              // DELETE
+              // ------------------------------------------------
+              Positioned(
+                top: 5,
+                right: 5,
+                child: IconButton.filledTonal(
+                  onPressed: () {
+                    setState(() {
+                      widget.onDelete(index);
+                    });
+                  },
+                  icon: const Icon(Icons.delete_outline),
+                ),
+              ),
+
+              // ------------------------------------------------
+              // EDIT
+              // ------------------------------------------------
+              Positioned(
+                bottom: 8,
+                right: 8,
+                child: FilledButton.tonalIcon(
+                  onPressed: () async {
+                    await widget.onEdit(index);
+
+                    if (mounted) {
+                      setState(() {});
+                    }
+                  },
+                  icon: const Icon(Icons.crop),
+                  label: const Text('اصلاح برش'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ==========================================================
+  // SAVE
+  // ==========================================================
+
+  Future<void> _save() async {
+    if (widget.scans.isEmpty) return;
 
     try {
       setState(() {
-        processing = true;
-        status = 'در حال آماده‌سازی فایل...';
+        saving = true;
       });
+
+      String filename = nameController.text.trim();
+
+      if (filename.isEmpty) {
+        filename = _defaultFileName();
+      }
+
+      filename = _sanitizeFileName(filename);
 
       final directory = await getApplicationDocumentsDirectory();
 
@@ -1199,143 +1575,112 @@ class _ScannerPageState extends State<ScannerPage> {
         await scanDirectory.create(recursive: true);
       }
 
-      if (pages.length == 1) {
-        await _saveJpg(scanDirectory, fileName);
-      } else {
-        await _savePdf(scanDirectory, fileName);
+      // --------------------------------------------------------
+      // SINGLE IMAGE
+      // --------------------------------------------------------
+
+      if (widget.scans.length == 1) {
+        final outputPath = path.join(scanDirectory.path, '$filename.jpg');
+
+        final file = File(outputPath);
+
+        await file.writeAsBytes(widget.scans.first.processedBytes, flush: true);
+
+        if (!mounted) return;
+
+        await _showSavedDialog(outputPath);
+
+        return;
       }
+
+      // --------------------------------------------------------
+      // MULTIPLE -> PDF
+      // --------------------------------------------------------
+
+      final document = pw.Document();
+
+      for (final scan in widget.scans) {
+        final imageProvider = pw.MemoryImage(scan.processedBytes);
+
+        document.addPage(
+          pw.Page(
+            pageFormat: PdfPageFormat.a4,
+            margin: const pw.EdgeInsets.all(0),
+            build: (context) {
+              return pw.Center(
+                child: pw.Image(imageProvider, fit: pw.BoxFit.contain),
+              );
+            },
+          ),
+        );
+      }
+
+      final pdfBytes = await document.save();
+
+      final outputPath = path.join(scanDirectory.path, '$filename.pdf');
+
+      final file = File(outputPath);
+
+      await file.writeAsBytes(pdfBytes, flush: true);
 
       if (!mounted) return;
 
-      setState(() {
-        processing = false;
-        status = 'فایل با موفقیت ذخیره شد';
-      });
-
-      await _showSavedDialog(fileName, scanDirectory);
+      await _showSavedDialog(outputPath);
     } catch (e) {
       if (!mounted) return;
 
-      setState(() {
-        processing = false;
-        status = 'خطا در ذخیره: $e';
-      });
-    }
-  }
-
-  // ==========================================================
-  // SAVE JPG
-  // ==========================================================
-
-  Future<void> _saveJpg(Directory directory, String fileName) async {
-    final page = pages.first;
-
-    if (page.finalBytes == null) {
-      await _generatePreview(page);
-    }
-
-    final outputPath = path.join(directory.path, '$fileName.jpg');
-
-    await File(outputPath).writeAsBytes(page.finalBytes!, flush: true);
-  }
-
-  // ==========================================================
-  // SAVE PDF
-  // ==========================================================
-
-  Future<void> _savePdf(Directory directory, String fileName) async {
-    final document = pw.Document();
-
-    for (final page in pages) {
-      if (page.finalBytes == null) {
-        await _generatePreview(page);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('خطا در ذخیره فایل: $e')));
+    } finally {
+      if (mounted) {
+        setState(() {
+          saving = false;
+        });
       }
-
-      final image = pw.MemoryImage(page.finalBytes!);
-
-      document.addPage(
-        pw.Page(
-          pageFormat: PdfPageFormat.a4,
-          margin: const pw.EdgeInsets.all(0),
-          build: (context) {
-            return pw.Center(child: pw.Image(image, fit: pw.BoxFit.contain));
-          },
-        ),
-      );
     }
-
-    final outputPath = path.join(directory.path, '$fileName.pdf');
-
-    await File(outputPath).writeAsBytes(await document.save(), flush: true);
   }
 
   // ==========================================================
-  // DEFAULT FILE NAME
+  // SANITIZE
   // ==========================================================
 
-  String _defaultFileName() {
-    final now = DateTime.now();
-
-    String two(int value) => value.toString().padLeft(2, '0');
-
-    return 'scan_${now.year}-'
-        '${two(now.month)}-'
-        '${two(now.day)}_'
-        '${two(now.hour)}-'
-        '${two(now.minute)}-'
-        '${two(now.second)}';
+  String _sanitizeFileName(String value) {
+    return value.replaceAll(RegExp(r'[<>:"/\\|?*]'), '_');
   }
 
   // ==========================================================
   // SAVED DIALOG
   // ==========================================================
 
-  Future<void> _showSavedDialog(String fileName, Directory directory) async {
-    final extension = pages.length == 1 ? 'jpg' : 'pdf';
-
-    final fullPath = path.join(directory.path, '$fileName.$extension');
-
-    if (!mounted) return;
+  Future<void> _showSavedDialog(String outputPath) async {
+    setState(() {
+      saving = false;
+    });
 
     await showDialog(
       context: context,
       builder: (context) {
         return AlertDialog(
-          icon: const Icon(Icons.check_circle, color: Colors.green, size: 48),
-          title: const Text('ذخیره شد'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
+          title: const Row(
             children: [
-              Text(
-                '$fileName.$extension',
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontWeight: FontWeight.bold),
-              ),
-
-              const SizedBox(height: 12),
-
-              SelectableText(
-                fullPath,
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
-              ),
+              Icon(Icons.check_circle, color: Colors.green),
+              SizedBox(width: 8),
+              Text('ذخیره شد'),
             ],
+          ),
+          content: Text(
+            'فایل با موفقیت ذخیره شد.\n\n$outputPath',
+            textDirection: TextDirection.ltr,
           ),
           actions: [
             FilledButton(
               onPressed: () {
-                Navigator.pop(context);
+                Navigator.of(context).pop();
 
-                setState(() {
-                  pages.clear();
-                  editingPageIndex = null;
-
-                  status = cameraAvailable
-                      ? 'آماده گرفتن تصویر بعدی'
-                      : 'تصویر انتخاب کنید';
-                });
+                Navigator.of(context).pop();
               },
-              child: const Text('اسکن جدید'),
+              child: const Text('باشه'),
             ),
           ],
         );
@@ -1343,106 +1688,10 @@ class _ScannerPageState extends State<ScannerPage> {
     );
   }
 
-  // ==========================================================
-  // DISPOSE
-  // ==========================================================
-
   @override
   void dispose() {
-    _cameraController?.dispose();
-
+    nameController.dispose();
     super.dispose();
-  }
-}
-
-// ============================================================
-// CAMERA GUIDE
-// ============================================================
-
-class CameraGuidePainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.black.withOpacity(.25)
-      ..style = PaintingStyle.fill;
-
-    final documentWidth = size.width * .82;
-
-    final documentHeight = documentWidth * 1.414;
-
-    final left = (size.width - documentWidth) / 2;
-
-    final top = (size.height - documentHeight) / 2;
-
-    final rect = RRect.fromRectAndRadius(
-      Rect.fromLTWH(left, top, documentWidth, documentHeight),
-      const Radius.circular(12),
-    );
-
-    // فعلاً فقط کادر راهنما
-    final borderPaint = Paint()
-      ..color = Colors.white
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2;
-
-    canvas.drawRRect(rect, borderPaint);
-
-    // چهار گوشه
-    final cornerPaint = Paint()
-      ..color = Colors.tealAccent
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 5;
-
-    const length = 30.0;
-
-    // top-left
-    canvas.drawLine(Offset(left, top), Offset(left + length, top), cornerPaint);
-
-    canvas.drawLine(Offset(left, top), Offset(left, top + length), cornerPaint);
-
-    // top-right
-    canvas.drawLine(
-      Offset(left + documentWidth, top),
-      Offset(left + documentWidth - length, top),
-      cornerPaint,
-    );
-
-    canvas.drawLine(
-      Offset(left + documentWidth, top),
-      Offset(left + documentWidth, top + length),
-      cornerPaint,
-    );
-
-    // bottom-left
-    canvas.drawLine(
-      Offset(left, top + documentHeight),
-      Offset(left + length, top + documentHeight),
-      cornerPaint,
-    );
-
-    canvas.drawLine(
-      Offset(left, top + documentHeight),
-      Offset(left, top + documentHeight - length),
-      cornerPaint,
-    );
-
-    // bottom-right
-    canvas.drawLine(
-      Offset(left + documentWidth, top + documentHeight),
-      Offset(left + documentWidth - length, top + documentHeight),
-      cornerPaint,
-    );
-
-    canvas.drawLine(
-      Offset(left + documentWidth, top + documentHeight),
-      Offset(left + documentWidth, top + documentHeight - length),
-      cornerPaint,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant CameraGuidePainter oldDelegate) {
-    return false;
   }
 }
 
@@ -1459,9 +1708,7 @@ class DocumentPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final points = corners.points;
 
-    if (points.length != 4) {
-      return;
-    }
+    if (points.length != 4) return;
 
     final documentPath = Path()
       ..moveTo(points[0].dx, points[0].dy)
@@ -1489,5 +1736,180 @@ class DocumentPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant DocumentPainter oldDelegate) {
     return true;
+  }
+}
+
+// ============================================================
+// ZOOM PREVIEW
+// ============================================================
+
+class _ZoomPreview extends StatefulWidget {
+  final img.Image image;
+
+  final Offset point;
+
+  final double size;
+
+  final double zoom;
+
+  const _ZoomPreview({
+    required this.image,
+    required this.point,
+    required this.size,
+    required this.zoom,
+  });
+
+  @override
+  State<_ZoomPreview> createState() => _ZoomPreviewState();
+}
+
+class _ZoomPreviewState extends State<_ZoomPreview> {
+  Uint8List? bytes;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _prepare();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ZoomPreview oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    if (oldWidget.image != widget.image ||
+        oldWidget.point != widget.point ||
+        oldWidget.zoom != widget.zoom) {
+      _prepare();
+    }
+  }
+
+  Future<void> _prepare() async {
+    final cropSize = math.max(10, (widget.size / widget.zoom).round());
+
+    final left = (widget.point.dx - cropSize / 2).round();
+
+    final top = (widget.point.dy - cropSize / 2).round();
+
+    final maxLeft = math.max(0, widget.image.width - cropSize);
+
+    final maxTop = math.max(0, widget.image.height - cropSize);
+
+    final safeLeft = left.clamp(0, maxLeft);
+
+    final safeTop = top.clamp(0, maxTop);
+
+    final safeWidth = math.min(cropSize, widget.image.width - safeLeft);
+
+    final safeHeight = math.min(cropSize, widget.image.height - safeTop);
+
+    if (safeWidth <= 0 || safeHeight <= 0) {
+      return;
+    }
+
+    final cropped = img.copyCrop(
+      widget.image,
+      x: safeLeft,
+      y: safeTop,
+      width: safeWidth,
+      height: safeHeight,
+    );
+
+    final encoded = Uint8List.fromList(img.encodeJpg(cropped, quality: 95));
+
+    if (!mounted) return;
+
+    setState(() {
+      bytes = encoded;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: widget.size,
+      height: widget.size,
+      decoration: BoxDecoration(
+        color: Colors.black,
+        shape: BoxShape.circle,
+        border: Border.all(color: Colors.white, width: 3),
+        boxShadow: const [
+          BoxShadow(color: Colors.black54, blurRadius: 10, spreadRadius: 2),
+        ],
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (bytes != null)
+            Image.memory(bytes!, fit: BoxFit.cover)
+          else
+            const Center(
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Colors.white,
+              ),
+            ),
+
+          CustomPaint(painter: _ZoomCrosshairPainter()),
+
+          Positioned(
+            right: 8,
+            bottom: 7,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+              decoration: BoxDecoration(
+                color: Colors.black54,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                '${widget.zoom.toStringAsFixed(0)}×',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+// ZOOM CROSSHAIR
+// ============================================================
+
+class _ZoomCrosshairPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+
+    final paint = Paint()
+      ..color = Colors.red
+      ..strokeWidth = 1.5;
+
+    canvas.drawLine(
+      Offset(center.dx - 20, center.dy),
+      Offset(center.dx + 20, center.dy),
+      paint,
+    );
+
+    canvas.drawLine(
+      Offset(center.dx, center.dy - 20),
+      Offset(center.dx, center.dy + 20),
+      paint,
+    );
+
+    canvas.drawCircle(center, 4, Paint()..color = Colors.red);
+
+    canvas.drawCircle(center, 2, Paint()..color = Colors.white);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) {
+    return false;
   }
 }
