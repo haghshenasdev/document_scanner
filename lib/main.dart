@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui';
 
+import 'package:document_scanner/core/image_enhancer.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
@@ -49,6 +50,10 @@ class ScannerPage extends StatefulWidget {
 }
 
 class _ScannerPageState extends State<ScannerPage> {
+  ScanFilter selectedFilter = ScanFilter.document;
+
+  img.Image? rectifiedImage;
+  img.Image? filteredImage;
   // ----------------------------------------------------------
   // Original image
   // ----------------------------------------------------------
@@ -736,11 +741,21 @@ class _ScannerPageState extends State<ScannerPage> {
         return PerspectiveCorrector.rectify(decodedImage!, corners!);
       });
 
+      rectifiedImage = result;
+
+      final enhanced = await Future(() {
+        return ImageEnhancer.apply(result, selectedFilter);
+      });
+
+      filteredImage = enhanced;
+
       // ------------------------------------------------------
       // Encode JPG
       // ------------------------------------------------------
 
-      final jpg = Uint8List.fromList(img.encodeJpg(result, quality: 95));
+      final jpg = Uint8List.fromList(
+        img.encodeJpg(filteredImage!, quality: 95),
+      );
 
       // ------------------------------------------------------
       // Application directory
