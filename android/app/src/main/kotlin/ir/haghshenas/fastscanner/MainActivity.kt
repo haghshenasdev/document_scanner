@@ -1,4 +1,4 @@
-package com.example.document_scanner
+package ir.haghshenas.fastscanner
 
 import io.flutter.embedding.android.FlutterActivity
 
