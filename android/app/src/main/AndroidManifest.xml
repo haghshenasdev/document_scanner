@@ -1,6 +1,16 @@
+
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<!-- Permissions options for the `storage` group -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+    <!-- Read storage permission for Android 12 and lower -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
+    <!-- Permissions options for the `manage external storage` group -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+<!-- Permissions options for the `camera` group -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+
     <application
-        android:label="document_scanner"
+        android:label="اسکنر سریع"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
