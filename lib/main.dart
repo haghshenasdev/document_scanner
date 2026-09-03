@@ -16,11 +16,99 @@ import 'core/document_detector.dart';
 import 'core/image_enhancer.dart';
 import 'core/perspective_corrector.dart';
 import 'models/document_corners.dart';
+import 'package:flutter/services.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  await FastScannerBridge.initialize();
+
   runApp(const DocumentScannerApp());
+}
+
+class ScanRequest {
+  final String? recordId;
+  final String? returnPackage;
+  final String? returnAction;
+  final bool isExternalScan;
+
+  const ScanRequest({
+    this.recordId,
+    this.returnPackage,
+    this.returnAction,
+    this.isExternalScan = false,
+  });
+
+  factory ScanRequest.fromMap(Map<dynamic, dynamic> map) {
+    return ScanRequest(
+      recordId: map['record_id']?.toString(),
+      returnPackage: map['return_package']?.toString(),
+      returnAction: map['return_action']?.toString(),
+      isExternalScan: map['is_external_scan'] == true,
+    );
+  }
+}
+
+class FastScannerBridge {
+  static const MethodChannel _channel = MethodChannel('fastscanner/intent');
+
+  static ScanRequest? _request;
+
+  static Future<ScanRequest> initialize() async {
+    try {
+      final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+        'getScanRequest',
+      );
+
+      if (result == null) {
+        _request = const ScanRequest();
+        return _request!;
+      }
+
+      _request = ScanRequest.fromMap(result);
+
+      return _request!;
+    } catch (e) {
+      debugPrint('FastScannerBridge initialize error: $e');
+
+      _request = const ScanRequest();
+
+      return _request!;
+    }
+  }
+
+  static ScanRequest? get request => _request;
+
+  static Future<bool> completeScan({
+    required String outputPath,
+    required String mimeType,
+    required String recordId,
+  }) async {
+    try {
+      final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+        'completeScan',
+        {
+          'output_path': outputPath,
+          'mime_type': mimeType,
+          'record_id': recordId,
+        },
+      );
+
+      return result?['returned'] == true;
+    } catch (e) {
+      debugPrint('FastScannerBridge completeScan error: $e');
+
+      return false;
+    }
+  }
+
+  static Future<void> cancelScan() async {
+    try {
+      await _channel.invokeMethod('cancelScan');
+    } catch (e) {
+      debugPrint('FastScannerBridge cancel error: $e');
+    }
+  }
 }
 
 // ============================================================
@@ -80,6 +168,7 @@ class _ScannerPageState extends State<ScannerPage> {
   // ==========================================================
   // CAMERA
   // ==========================================================
+  ScanRequest? scanRequest;
 
   CameraController? _cameraController;
 
@@ -103,13 +192,22 @@ class _ScannerPageState extends State<ScannerPage> {
 
   String status = 'دوربین در حال آماده‌سازی است...';
 
+  bool get isExternalScan {
+    return scanRequest?.isExternalScan == true && scanRequest?.recordId != null;
+  }
+
+  String? get externalRecordId {
+    return scanRequest?.recordId;
+  }
+
   // ==========================================================
   // INIT
   // ==========================================================
-
   @override
   void initState() {
     super.initState();
+
+    scanRequest = FastScannerBridge.request;
 
     _initializeCamera();
   }
@@ -1550,7 +1648,9 @@ class _SavePreviewPageState extends State<SavePreviewPage> {
   // ==========================================================
 
   Future<void> _save() async {
-    if (widget.scans.isEmpty) return;
+    if (widget.scans.isEmpty) {
+      return;
+    }
 
     try {
       setState(() {
@@ -1559,43 +1659,30 @@ class _SavePreviewPageState extends State<SavePreviewPage> {
 
       String filename = nameController.text.trim();
 
-      if (filename.isEmpty) {
-        filename = _defaultFileName();
+      // ==========================================================
+      // اگر از دبیرخانه آمده ایم، نام فایل همان شماره نامه است
+      // ==========================================================
+
+      final request = FastScannerBridge.request;
+
+      final externalScan =
+          request?.isExternalScan == true && request?.recordId != null;
+
+      if (externalScan) {
+        filename = request!.recordId!;
+
+        debugPrint('External scan for record: $filename');
+      } else {
+        if (filename.isEmpty) {
+          filename = _defaultFileName();
+        }
+
+        filename = _sanitizeFileName(filename);
       }
 
-      filename = _sanitizeFileName(filename);
-
-      final directory = await getApplicationDocumentsDirectory();
-
-      final scanDirectory = Directory(
-        path.join(directory.path, 'scanned_documents'),
-      );
-
-      if (!await scanDirectory.exists()) {
-        await scanDirectory.create(recursive: true);
-      }
-
-      // --------------------------------------------------------
-      // SINGLE IMAGE
-      // --------------------------------------------------------
-
-      if (widget.scans.length == 1) {
-        final outputPath = path.join(scanDirectory.path, '$filename.jpg');
-
-        final file = File(outputPath);
-
-        await file.writeAsBytes(widget.scans.first.processedBytes, flush: true);
-
-        if (!mounted) return;
-
-        await _showSavedDialog(outputPath);
-
-        return;
-      }
-
-      // --------------------------------------------------------
-      // MULTIPLE -> PDF
-      // --------------------------------------------------------
+      // ==========================================================
+      // تولید PDF
+      // ==========================================================
 
       final document = pw.Document();
 
@@ -1617,21 +1704,95 @@ class _SavePreviewPageState extends State<SavePreviewPage> {
 
       final pdfBytes = await document.save();
 
+      // ==========================================================
+      // حالت اتصال به دبیرخانه
+      // ==========================================================
+
+      if (externalScan) {
+        final externalDirectory = Directory(
+          '/storage/emulated/0/Download/FastScanner',
+        );
+
+        if (!await externalDirectory.exists()) {
+          await externalDirectory.create(recursive: true);
+        }
+
+        final outputPath = path.join(externalDirectory.path, '$filename.pdf');
+
+        final file = File(outputPath);
+
+        await file.writeAsBytes(pdfBytes, flush: true);
+
+        if (!await file.exists()) {
+          throw Exception('فایل خروجی ایجاد نشد.');
+        }
+
+        final fileSize = await file.length();
+
+        if (fileSize <= 0) {
+          throw Exception('فایل خروجی خالی است.');
+        }
+
+        debugPrint('External scan saved: $outputPath');
+
+        debugPrint('File size: $fileSize');
+
+        // ========================================================
+        // اعلام نتیجه به دبیرخانه
+        // ========================================================
+
+        final returned = await FastScannerBridge.completeScan(
+          outputPath: outputPath,
+          mimeType: 'application/pdf',
+          recordId: filename,
+        );
+
+        if (!returned) {
+          throw Exception('نتوانستیم نتیجه اسکن را به دبیرخانه برگردانیم.');
+        }
+
+        return;
+      }
+
+      // ==========================================================
+      // حالت عادی FastScanner
+      // ==========================================================
+
+      final directory = await getApplicationDocumentsDirectory();
+
+      final scanDirectory = Directory(
+        path.join(directory.path, 'scanned_documents'),
+      );
+
+      if (!await scanDirectory.exists()) {
+        await scanDirectory.create(recursive: true);
+      }
+
       final outputPath = path.join(scanDirectory.path, '$filename.pdf');
 
       final file = File(outputPath);
 
       await file.writeAsBytes(pdfBytes, flush: true);
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       await _showSavedDialog(outputPath);
     } catch (e) {
-      if (!mounted) return;
+      debugPrint('Save error: $e');
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        saving = false;
+      });
 
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('خطا در ذخیره فایل: $e')));
+      ).showSnackBar(SnackBar(content: Text('خطا در ذخیره فایل:\n$e')));
     } finally {
       if (mounted) {
         setState(() {
