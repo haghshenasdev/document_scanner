@@ -144,7 +144,11 @@ class DocumentScannerApp extends StatelessWidget {
 class ScanItem {
   final Uint8List originalBytes;
 
-  final img.Image originalImage;
+  /// تصویر Decode شده را فقط زمانی نگه می‌داریم که لازم باشد.
+  ///
+  /// برای جلوگیری از Decode مجدد روی UI بعد از هر عکس،
+  /// این مقدار می‌تواند null باشد و در زمان ورود به ادیتور Decode شود.
+  img.Image? originalImage;
 
   final DocumentCorners corners;
 
@@ -202,9 +206,6 @@ class _ScannerPageState extends State<ScannerPage> {
   // PENDING PHOTO
   // ==========================================================
 
-  /// مسیر عکس خامی که همین الان گرفته شده.
-  ///
-  /// این تصویر قبل از تمام شدن پردازش نمایش داده می‌شود.
   String? _pendingPhotoPath;
 
   // ==========================================================
@@ -269,21 +270,23 @@ class _ScannerPageState extends State<ScannerPage> {
       }
 
       // ======================================================
-      // IMPORTANT
+      // PERFORMANCE
       // ======================================================
       //
-      // قبلاً max بود.
+      // max برای اسکن خیلی سنگین است.
       //
-      // max روی بعضی گوشی‌ها عکس بسیار بزرگی تولید
-      // می‌کند و پردازش را چند برابر سنگین‌تر می‌کند.
+      // high معمولاً برای Document Scanner تعادل بسیار خوبی
+      // بین کیفیت، حجم عکس و سرعت پردازش دارد.
       //
-      // veryHigh برای اسکن مناسب‌تر است.
+      // اگر روی گوشی قدرتمند کیفیت بیشتری خواستی می‌توانی
+      // آن را به veryHigh تغییر بدهی.
       //
 
       final controller = CameraController(
         selectedCamera,
-        ResolutionPreset.veryHigh,
+        ResolutionPreset.high,
         enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.jpeg,
       );
 
       _cameraController = controller;
@@ -294,7 +297,6 @@ class _ScannerPageState extends State<ScannerPage> {
 
       setState(() {
         cameraAvailable = true;
-
         cameraInitializing = false;
 
         status = scans.isEmpty
@@ -415,6 +417,14 @@ class _ScannerPageState extends State<ScannerPage> {
   Widget _buildCameraPreview() {
     final controller = _cameraController!;
 
+    final previewSize = controller.value.previewSize;
+
+    if (previewSize == null) {
+      return const Center(
+        child: CircularProgressIndicator(color: Colors.white),
+      );
+    }
+
     return Container(
       width: double.infinity,
       color: Colors.black,
@@ -422,12 +432,8 @@ class _ScannerPageState extends State<ScannerPage> {
       child: FittedBox(
         fit: BoxFit.contain,
         child: SizedBox(
-          width:
-              controller.value.previewSize?.height ??
-              MediaQuery.of(context).size.width,
-          height:
-              controller.value.previewSize?.width ??
-              MediaQuery.of(context).size.height,
+          width: previewSize.height,
+          height: previewSize.width,
           child: CameraPreview(controller),
         ),
       ),
@@ -599,30 +605,30 @@ class _ScannerPageState extends State<ScannerPage> {
   // ==========================================================
 
   Widget _buildShutterButton() {
+    final enabled = cameraAvailable && !takingPicture && !processing;
+
     return GestureDetector(
-      onTap: cameraAvailable && !takingPicture && !processing
-          ? capturePhoto
-          : null,
+      onTap: enabled ? capturePhoto : null,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
         width: 78,
         height: 78,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color: cameraAvailable ? Colors.white : Colors.white24,
+          color: enabled ? Colors.white : Colors.white24,
           border: Border.all(color: Colors.white70, width: 4),
           boxShadow: const [
             BoxShadow(color: Colors.black54, blurRadius: 12, spreadRadius: 2),
           ],
         ),
-        child: takingPicture
+        child: takingPicture || processing
             ? const Padding(
                 padding: EdgeInsets.all(23),
                 child: CircularProgressIndicator(strokeWidth: 3),
               )
             : Icon(
                 Icons.camera_alt,
-                color: cameraAvailable ? Colors.black87 : Colors.white38,
+                color: enabled ? Colors.black87 : Colors.white38,
                 size: 32,
               ),
       ),
@@ -742,23 +748,27 @@ class _ScannerPageState extends State<ScannerPage> {
   // ==========================================================
 
   Widget _pendingThumbnail() {
-    return Transform.rotate(
-      angle: 0,
-      child: Container(
-        width: 61,
-        height: 74,
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(7),
-          border: Border.all(color: Colors.white, width: 2),
-          boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 8)],
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: Image.file(
-          File(_pendingPhotoPath!),
-          fit: BoxFit.cover,
-          gaplessPlayback: true,
-        ),
+    final filePath = _pendingPhotoPath;
+
+    if (filePath == null) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      width: 61,
+      height: 74,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: Colors.white, width: 2),
+        boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 8)],
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Image.file(
+        File(filePath),
+        fit: BoxFit.cover,
+        gaplessPlayback: true,
+        filterQuality: FilterQuality.low,
       ),
     );
   }
@@ -789,6 +799,7 @@ class _ScannerPageState extends State<ScannerPage> {
           item.processedBytes,
           fit: BoxFit.cover,
           gaplessPlayback: true,
+          filterQuality: FilterQuality.low,
         ),
       ),
     );
@@ -843,20 +854,21 @@ class _ScannerPageState extends State<ScannerPage> {
 
       final XFile file = await controller.takePicture();
 
-      // ======================================================
-      // VERY IMPORTANT
-      //
-      // همین لحظه عکس را نمایش بده.
-      //
-      // دیگر منتظر پردازش نمی‌مانیم.
-      // ======================================================
+      if (!mounted) {
+        return;
+      }
 
-      if (!mounted) return;
+      // ======================================================
+      // IMMEDIATELY SHOW PHOTO
+      // ======================================================
 
       setState(() {
         _pendingPhotoPath = file.path;
+
         takingPicture = false;
+
         processing = true;
+
         status = 'تصویر گرفته شد؛ در حال پردازش...';
       });
 
@@ -864,42 +876,81 @@ class _ScannerPageState extends State<ScannerPage> {
       // READ BYTES
       // ======================================================
 
-      final bytes = await file.readAsBytes();
+      final Uint8List bytes = await file.readAsBytes();
+
+      if (!mounted) {
+        return;
+      }
 
       // ======================================================
-      // PROCESS IN ISOLATE
+      // PROCESS IN REAL ISOLATE
       // ======================================================
+
+      final filterIndex = ScanFilter.values.indexOf(selectedFilter);
 
       final result = await compute(processImageInIsolate, {
         'bytes': bytes,
-        'filterIndex': ScanFilter.values.indexOf(selectedFilter),
+        'filterIndex': filterIndex,
       });
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
+
+      // ======================================================
+      // ADD RESULT
+      // ======================================================
 
       await _addProcessedResult(result);
 
-      // ======================================================
-      // REMOVE PENDING
-      // ======================================================
-
-      if (mounted) {
-        setState(() {
-          _pendingPhotoPath = null;
-          processing = false;
-
-          status = '${scans.length} صفحه آماده است';
-        });
+      if (!mounted) {
+        return;
       }
-    } catch (e) {
-      debugPrint('Capture error: $e');
-
-      if (!mounted) return;
 
       setState(() {
         _pendingPhotoPath = null;
-        takingPicture = false;
+
         processing = false;
+
+        takingPicture = false;
+
+        status = '${scans.length} صفحه آماده است';
+      });
+
+      // ======================================================
+      // DELETE TEMP CAMERA FILE
+      // ======================================================
+      //
+      // فقط بعد از اینکه پردازش تمام شد.
+      //
+      // اگر بعداً خواستی pending photo را برای چیزی دیگر
+      // نگه داری، این قسمت را حذف کن.
+      //
+
+      try {
+        final tempFile = File(file.path);
+
+        if (await tempFile.exists()) {
+          await tempFile.delete();
+        }
+      } catch (_) {
+        // عدم حذف فایل موقت روی عملکرد اسکن اثری ندارد.
+      }
+    } catch (e, stack) {
+      debugPrint('Capture error: $e');
+      debugPrintStack(stackTrace: stack);
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _pendingPhotoPath = null;
+
+        takingPicture = false;
+
+        processing = false;
+
         status = 'خطا در گرفتن یا پردازش تصویر';
       });
 
@@ -925,44 +976,45 @@ class _ScannerPageState extends State<ScannerPage> {
     final processedBytes = result['processedBytes'] as Uint8List;
 
     // ========================================================
-    // این Decode فقط بعد از اتمام پردازش انجام می‌شود.
+    // IMPORTANT
     //
-    // بنابراین هنگام فشار دادن دکمه دوربین،
-    // UI را قفل نمی‌کند.
+    // دیگر اینجا img.decodeImage انجام نمی‌دهیم.
+    //
+    // قبلاً بعد از پردازش، تصویر اصلی روی UI Decode می‌شد
+    // و روی بعضی گوشی‌ها یک مکث کوتاه ایجاد می‌کرد.
+    //
+    // حالا originalImage = null است و فقط زمانی که کاربر
+    // وارد Crop Editor شود Decode خواهد شد.
     // ========================================================
-
-    final originalImage = img.decodeImage(originalBytes);
-
-    if (originalImage == null) {
-      throw Exception('تصویر پردازش‌شده قابل خواندن نیست');
-    }
 
     final corners = DocumentCorners(
       topLeft: Offset(
-        result['topLeftX'] as double,
-        result['topLeftY'] as double,
+        (result['topLeftX'] as num).toDouble(),
+        (result['topLeftY'] as num).toDouble(),
       ),
       topRight: Offset(
-        result['topRightX'] as double,
-        result['topRightY'] as double,
+        (result['topRightX'] as num).toDouble(),
+        (result['topRightY'] as num).toDouble(),
       ),
       bottomRight: Offset(
-        result['bottomRightX'] as double,
-        result['bottomRightY'] as double,
+        (result['bottomRightX'] as num).toDouble(),
+        (result['bottomRightY'] as num).toDouble(),
       ),
       bottomLeft: Offset(
-        result['bottomLeftX'] as double,
-        result['bottomLeftY'] as double,
+        (result['bottomLeftX'] as num).toDouble(),
+        (result['bottomLeftY'] as num).toDouble(),
       ),
     );
 
-    if (!mounted) return;
+    if (!mounted) {
+      return;
+    }
 
     setState(() {
       scans.add(
         ScanItem(
           originalBytes: originalBytes,
-          originalImage: originalImage,
+          originalImage: null,
           corners: corners,
           processedBytes: processedBytes,
         ),
@@ -975,7 +1027,9 @@ class _ScannerPageState extends State<ScannerPage> {
   // ==========================================================
 
   Future<void> pickImages() async {
-    if (processing) return;
+    if (processing) {
+      return;
+    }
 
     try {
       final result = await FilePicker.platform.pickFiles(
@@ -1003,9 +1057,12 @@ class _ScannerPageState extends State<ScannerPage> {
         await _processAndAddImage(bytes);
       }
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
+        processing = false;
         status = 'خطا در انتخاب تصویر: $e';
       });
     }
@@ -1016,35 +1073,58 @@ class _ScannerPageState extends State<ScannerPage> {
   // ==========================================================
 
   Future<void> _processAndAddImage(Uint8List bytes) async {
-    if (!mounted) return;
+    if (!mounted) {
+      return;
+    }
 
     try {
       setState(() {
         processing = true;
-        status = 'در حال تشخیص و برش سند...';
+        status = 'در حال پردازش تصویر...';
       });
+
+      // ======================================================
+      // ALL HEAVY WORK -> ISOLATE
+      // ======================================================
+
+      final filterIndex = ScanFilter.values.indexOf(selectedFilter);
 
       final result = await compute(processImageInIsolate, {
         'bytes': bytes,
-        'filterIndex': ScanFilter.values.indexOf(selectedFilter),
+        'filterIndex': filterIndex,
       });
+
+      if (!mounted) {
+        return;
+      }
 
       await _addProcessedResult(result);
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
         processing = false;
 
         status = '${scans.length} صفحه آماده است';
       });
-    } catch (e) {
-      if (!mounted) return;
+    } catch (e, stack) {
+      debugPrint('File processing error: $e');
+      debugPrintStack(stackTrace: stack);
+
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
         processing = false;
         status = 'خطا در پردازش تصویر: $e';
       });
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('خطا در پردازش تصویر: $e')));
     }
   }
 
@@ -1067,7 +1147,9 @@ class _ScannerPageState extends State<ScannerPage> {
       ),
     );
 
-    if (!mounted) return;
+    if (!mounted) {
+      return;
+    }
 
     setState(() {
       status = scans.isEmpty
@@ -1152,9 +1234,11 @@ class CropEditorPage extends StatefulWidget {
 class _CropEditorPageState extends State<CropEditorPage> {
   late DocumentCorners corners;
 
-  late img.Image image;
+  img.Image? image;
 
   bool processing = false;
+
+  bool loadingImage = true;
 
   int? activeCorner;
 
@@ -1166,9 +1250,77 @@ class _CropEditorPageState extends State<CropEditorPage> {
   void initState() {
     super.initState();
 
-    image = widget.item.originalImage;
-
     corners = widget.item.corners.copy();
+
+    _loadImage();
+  }
+
+  // ==========================================================
+  // LOAD ORIGINAL IMAGE
+  // ==========================================================
+
+  Future<void> _loadImage() async {
+    try {
+      final existing = widget.item.originalImage;
+
+      if (existing != null) {
+        if (!mounted) return;
+
+        setState(() {
+          image = existing;
+          loadingImage = false;
+        });
+
+        return;
+      }
+
+      // Decode فقط هنگام باز کردن ادیتور انجام می‌شود.
+      final decoded = await compute(
+        _decodeImageInIsolate,
+        widget.item.originalBytes,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      if (decoded == null) {
+        throw Exception('تصویر اصلی قابل خواندن نیست');
+      }
+
+      // ======================================================
+      // img.Image را نمی‌توان بین isolateها ارسال کرد.
+      //
+      // بنابراین این Decode از isolate برمی‌گردد به شکل
+      // Uint8List و اینجا دوباره decode می‌کنیم.
+      //
+      // برای جلوگیری از پیچیدگی غیرضروری، فعلاً همین مسیر
+      // را نگه می‌داریم.
+      // ======================================================
+
+      final decodedImage = img.decodeImage(decoded);
+
+      if (decodedImage == null) {
+        throw Exception('تصویر اصلی قابل خواندن نیست');
+      }
+
+      widget.item.originalImage = decodedImage;
+
+      setState(() {
+        image = decodedImage;
+        loadingImage = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        loadingImage = false;
+      });
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('خطا در باز کردن تصویر: $e')));
+    }
   }
 
   @override
@@ -1181,13 +1333,15 @@ class _CropEditorPageState extends State<CropEditorPage> {
         title: const Text('تنظیم برش'),
         actions: [
           TextButton.icon(
-            onPressed: processing ? null : _applyChanges,
+            onPressed: processing || loadingImage ? null : _applyChanges,
             icon: const Icon(Icons.check),
             label: const Text('اعمال'),
           ),
         ],
       ),
-      body: processing
+      body: loadingImage || image == null
+          ? const Center(child: CircularProgressIndicator(color: Colors.white))
+          : processing
           ? const Center(child: CircularProgressIndicator(color: Colors.white))
           : _editor(),
       bottomNavigationBar: SafeArea(
@@ -1208,11 +1362,13 @@ class _CropEditorPageState extends State<CropEditorPage> {
   // ==========================================================
 
   Widget _editor() {
+    final currentImage = image!;
+
     return LayoutBuilder(
       builder: (context, constraints) {
-        final imageWidth = image.width.toDouble();
+        final imageWidth = currentImage.width.toDouble();
 
-        final imageHeight = image.height.toDouble();
+        final imageHeight = currentImage.height.toDouble();
 
         double displayWidth = constraints.maxWidth;
 
@@ -1258,6 +1414,8 @@ class _CropEditorPageState extends State<CropEditorPage> {
                   child: Image.memory(
                     widget.item.originalBytes,
                     fit: BoxFit.fill,
+                    filterQuality: FilterQuality.medium,
+                    gaplessPlayback: true,
                   ),
                 ),
 
@@ -1300,26 +1458,22 @@ class _CropEditorPageState extends State<CropEditorPage> {
         top: point.dy - 23,
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
-
           onPanStart: (_) {
             setState(() {
               activeCorner = index;
             });
           },
-
           onPanUpdate: (details) {
             _moveCorner(
               index,
               Offset(details.delta.dx / scaleX, details.delta.dy / scaleY),
             );
           },
-
           onPanEnd: (_) {
             setState(() {
               activeCorner = null;
             });
           },
-
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 100),
             width: isActive ? 52 : 46,
@@ -1348,6 +1502,12 @@ class _CropEditorPageState extends State<CropEditorPage> {
   // ==========================================================
 
   void _moveCorner(int index, Offset delta) {
+    final currentImage = image;
+
+    if (currentImage == null) {
+      return;
+    }
+
     final c = corners.copy();
 
     Offset updated;
@@ -1374,8 +1534,8 @@ class _CropEditorPageState extends State<CropEditorPage> {
     }
 
     updated = Offset(
-      updated.dx.clamp(0, image.width.toDouble()),
-      updated.dy.clamp(0, image.height.toDouble()),
+      updated.dx.clamp(0, currentImage.width.toDouble()),
+      updated.dy.clamp(0, currentImage.height.toDouble()),
     );
 
     switch (index) {
@@ -1412,7 +1572,9 @@ class _CropEditorPageState extends State<CropEditorPage> {
     double displayWidth,
     double displayHeight,
   ) {
-    if (activeCorner == null) {
+    final currentImage = image;
+
+    if (activeCorner == null || currentImage == null) {
       return const SizedBox.shrink();
     }
 
@@ -1447,7 +1609,7 @@ class _CropEditorPageState extends State<CropEditorPage> {
       left: left,
       top: top,
       child: _ZoomPreview(
-        image: image,
+        image: currentImage,
         point: originalPoint,
         size: zoomSize,
         zoom: zoomFactor,
@@ -1460,6 +1622,10 @@ class _CropEditorPageState extends State<CropEditorPage> {
   // ==========================================================
 
   Future<void> _applyChanges() async {
+    if (processing || image == null) {
+      return;
+    }
+
     try {
       setState(() {
         processing = true;
@@ -1492,11 +1658,15 @@ class _CropEditorPageState extends State<CropEditorPage> {
         processedBytes: bytes,
       );
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       Navigator.of(context).pop(updated);
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
         processing = false;
@@ -1507,6 +1677,20 @@ class _CropEditorPageState extends State<CropEditorPage> {
       ).showSnackBar(SnackBar(content: Text('خطا در اعمال برش: $e')));
     }
   }
+}
+
+// ============================================================
+// DECODE IMAGE ISOLATE
+// ============================================================
+
+Uint8List? _decodeImageInIsolate(Uint8List bytes) {
+  final decoded = img.decodeImage(bytes);
+
+  if (decoded == null) {
+    return null;
+  }
+
+  return Uint8List.fromList(img.encodeJpg(decoded, quality: 95));
 }
 
 // ============================================================
@@ -1584,7 +1768,9 @@ class _SavePreviewPageState extends State<SavePreviewPage> {
                   '${widget.scans.length} صفحه',
                   style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
+
                 const Spacer(),
+
                 Text(
                   widget.scans.length == 1 ? 'JPG' : 'PDF',
                   style: TextStyle(
@@ -1652,7 +1838,11 @@ class _SavePreviewPageState extends State<SavePreviewPage> {
           child: Stack(
             children: [
               Positioned.fill(
-                child: Image.memory(scan.processedBytes, fit: BoxFit.contain),
+                child: Image.memory(
+                  scan.processedBytes,
+                  fit: BoxFit.contain,
+                  filterQuality: FilterQuality.medium,
+                ),
               ),
 
               Positioned(
@@ -1745,9 +1935,9 @@ class _SavePreviewPageState extends State<SavePreviewPage> {
         filename = _sanitizeFileName(filename);
       }
 
-      // ========================================================
+      // ======================================================
       // PDF
-      // ========================================================
+      // ======================================================
 
       final document = pw.Document();
 
@@ -1769,9 +1959,9 @@ class _SavePreviewPageState extends State<SavePreviewPage> {
 
       final pdfBytes = await document.save();
 
-      // ========================================================
+      // ======================================================
       // EXTERNAL
-      // ========================================================
+      // ======================================================
 
       if (externalScan) {
         final externalDirectory = Directory(
@@ -1815,9 +2005,9 @@ class _SavePreviewPageState extends State<SavePreviewPage> {
         return;
       }
 
-      // ========================================================
+      // ======================================================
       // NORMAL
-      // ========================================================
+      // ======================================================
 
       final directory = await getApplicationDocumentsDirectory();
 
@@ -2040,9 +2230,11 @@ class _ZoomPreviewState extends State<_ZoomPreview> {
       height: safeHeight,
     );
 
-    final encoded = Uint8List.fromList(img.encodeJpg(cropped, quality: 90));
+    final encoded = Uint8List.fromList(img.encodeJpg(cropped, quality: 85));
 
-    if (!mounted) return;
+    if (!mounted) {
+      return;
+    }
 
     setState(() {
       bytes = encoded;
@@ -2067,7 +2259,11 @@ class _ZoomPreviewState extends State<_ZoomPreview> {
         fit: StackFit.expand,
         children: [
           if (bytes != null)
-            Image.memory(bytes!, fit: BoxFit.cover)
+            Image.memory(
+              bytes!,
+              fit: BoxFit.cover,
+              filterQuality: FilterQuality.low,
+            )
           else
             const Center(
               child: CircularProgressIndicator(

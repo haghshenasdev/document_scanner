@@ -7,7 +7,24 @@ import 'package:image/image.dart' as img;
 import '../models/document_corners.dart';
 
 class DocumentDetector {
-  static const int maxDetectionSize = 1000;
+  // ---------------------------------------------------------------------------
+  // تنظیمات Performance
+  // ---------------------------------------------------------------------------
+
+  /// اندازه تصویر مورد استفاده برای تشخیص.
+  ///
+  /// 800 برای موبایل سرعت خوبی می‌دهد.
+  /// اگر دقت در گوشی‌های ضعیف مشکل داشت، آن را به 900 یا 1000 افزایش بده.
+  static const int maxDetectionSize = 800;
+
+  /// حداکثر تعداد نقاط مرزی که برای Line Fitting استفاده می‌شود.
+  static const int maxRefinePoints = 1600;
+
+  /// حداقل نسبت مساحت Component نسبت به کل تصویر.
+  static const double minComponentRatio = 0.10;
+
+  /// حداکثر تعداد تلاش در حالت عادی.
+  static const int fastThresholdCount = 3;
 
   // ---------------------------------------------------------------------------
   // Public API
@@ -18,72 +35,111 @@ class DocumentDetector {
       return null;
     }
 
+    // -------------------------------------------------------
+    // Resize
+    // -------------------------------------------------------
+
     final working = _resizeForDetection(original);
+
+    final width = working.width;
+    final height = working.height;
+
+    // -------------------------------------------------------
+    // Grayscale
+    // -------------------------------------------------------
 
     final gray = _grayscale(working);
 
+    // -------------------------------------------------------
+    // Otsu
+    // -------------------------------------------------------
+
     final otsu = _otsuThreshold(gray);
 
-    final thresholds = <int>{
-      (otsu - 30).clamp(40, 230),
-      (otsu - 20).clamp(40, 230),
-      (otsu - 10).clamp(40, 230),
+    // -------------------------------------------------------
+    // ابتدا فقط 3 threshold نزدیک Otsu
+    //
+    // در اکثر تصاویر یکی از این‌ها جواب می‌دهد.
+    // اگر جواب نگرفت، مرحله دوم فعال می‌شود.
+    // -------------------------------------------------------
+
+    final fastThresholds = <int>{
+      (otsu - 15).clamp(40, 230),
       otsu.clamp(40, 230),
-      (otsu + 10).clamp(40, 230),
-      (otsu + 20).clamp(40, 230),
-      (otsu + 30).clamp(40, 230),
+      (otsu + 15).clamp(40, 230),
     }.toList();
 
     DocumentCorners? best;
     double bestScore = double.negativeInfinity;
 
-    for (final threshold in thresholds) {
-      final binary = _threshold(gray, threshold);
+    // -------------------------------------------------------
+    // مرحله اول - سریع
+    // -------------------------------------------------------
 
-      final component = _largestComponent(
-        binary,
-        working.width,
-        working.height,
-      );
+    for (final threshold in fastThresholds) {
+      final candidate = _detectWithThreshold(gray, width, height, threshold);
 
-      if (component == null) {
+      if (candidate == null) {
         continue;
       }
-
-      final rough = _componentToCorners(
-        component,
-        working.width,
-        working.height,
-      );
-
-      if (rough == null) {
-        continue;
-      }
-
-      // -------------------------------------------------------
-      // مرحله مهم:
-      // اصلاح گوشه‌ها با Fit کردن خطوط واقعی اضلاع
-      // -------------------------------------------------------
-
-      final refined = _refineCorners(
-        rough,
-        component.boundary,
-        working.width,
-        working.height,
-      );
-
-      final candidate = refined ?? rough;
 
       final score = _scoreCandidate(
-        candidate,
-        component.area,
-        working.width,
-        working.height,
+        candidate.corners,
+        candidate.component.area,
+        width,
+        height,
       );
 
       if (score > bestScore) {
         bestScore = score;
-        best = candidate;
+        best = candidate.corners;
+      }
+
+      // اگر نتیجه خیلی خوب است دیگر Thresholdهای دیگر لازم نیستند.
+      if (score >= 72) {
+        break;
+      }
+    }
+
+    // -------------------------------------------------------
+    // مرحله دوم - فقط در صورت شکست
+    //
+    // این قسمت باعث می‌شود تصاویر معمولی سریع باشند ولی
+    // تصاویر سخت همچنان شانس تشخیص داشته باشند.
+    // -------------------------------------------------------
+
+    if (best == null) {
+      final fallbackThresholds = <int>{
+        (otsu - 30).clamp(40, 230),
+        (otsu - 20).clamp(40, 230),
+        (otsu - 10).clamp(40, 230),
+        (otsu + 10).clamp(40, 230),
+        (otsu + 20).clamp(40, 230),
+        (otsu + 30).clamp(40, 230),
+      }.toList();
+
+      for (final threshold in fallbackThresholds) {
+        final candidate = _detectWithThreshold(gray, width, height, threshold);
+
+        if (candidate == null) {
+          continue;
+        }
+
+        final score = _scoreCandidate(
+          candidate.corners,
+          candidate.component.area,
+          width,
+          height,
+        );
+
+        if (score > bestScore) {
+          bestScore = score;
+          best = candidate.corners;
+        }
+
+        if (score >= 72) {
+          break;
+        }
       }
     }
 
@@ -91,9 +147,12 @@ class DocumentDetector {
       return null;
     }
 
-    final scaleX = original.width / working.width;
+    // -------------------------------------------------------
+    // Scale corners back to original image
+    // -------------------------------------------------------
 
-    final scaleY = original.height / working.height;
+    final scaleX = original.width / width;
+    final scaleY = original.height / height;
 
     return DocumentCorners(
       topLeft: Offset(best.topLeft.dx * scaleX, best.topLeft.dy * scaleY),
@@ -110,20 +169,59 @@ class DocumentDetector {
   }
 
   // ---------------------------------------------------------------------------
+  // Detect using one threshold
+  // ---------------------------------------------------------------------------
+
+  static _DetectionResult? _detectWithThreshold(
+    Uint8List gray,
+    int width,
+    int height,
+    int threshold,
+  ) {
+    final binary = _threshold(gray, threshold);
+
+    final component = _largestComponent(binary, width, height);
+
+    if (component == null) {
+      return null;
+    }
+
+    final rough = _componentToCorners(component, width, height);
+
+    if (rough == null) {
+      return null;
+    }
+
+    // -------------------------------------------------------
+    // Refine
+    // -------------------------------------------------------
+
+    final refined = _refineCorners(rough, component.boundary, width, height);
+
+    return _DetectionResult(corners: refined ?? rough, component: component);
+  }
+
+  // ---------------------------------------------------------------------------
   // Resize
   // ---------------------------------------------------------------------------
 
   static img.Image _resizeForDetection(img.Image image) {
-    if (image.width <= maxDetectionSize && image.height <= maxDetectionSize) {
+    final largest = math.max(image.width, image.height);
+
+    if (largest <= maxDetectionSize) {
       return image;
     }
 
-    final ratio = maxDetectionSize / math.max(image.width, image.height);
+    final ratio = maxDetectionSize / largest;
+
+    final newWidth = math.max(1, (image.width * ratio).round());
+
+    final newHeight = math.max(1, (image.height * ratio).round());
 
     return img.copyResize(
       image,
-      width: math.max(1, (image.width * ratio).round()),
-      height: math.max(1, (image.height * ratio).round()),
+      width: newWidth,
+      height: newHeight,
       interpolation: img.Interpolation.linear,
     );
   }
@@ -144,14 +242,11 @@ class DocumentDetector {
       for (int x = 0; x < width; x++) {
         final pixel = image.getPixel(x, y);
 
-        final r = pixel.r.toDouble();
-        final g = pixel.g.toDouble();
-        final b = pixel.b.toDouble();
+        // به جای toDouble و clamp غیرضروری،
+        // مستقیماً مقدار را محاسبه می‌کنیم.
+        final value = (0.299 * pixel.r) + (0.587 * pixel.g) + (0.114 * pixel.b);
 
-        result[index++] = (0.299 * r + 0.587 * g + 0.114 * b).round().clamp(
-          0,
-          255,
-        );
+        result[index++] = value.round();
       }
     }
 
@@ -159,31 +254,32 @@ class DocumentDetector {
   }
 
   // ---------------------------------------------------------------------------
-  // Otsu
+  // Otsu Threshold
   // ---------------------------------------------------------------------------
 
   static int _otsuThreshold(Uint8List gray) {
-    final histogram = Int64List(256);
+    final histogram = Int32List(256);
 
-    for (final value in gray) {
-      histogram[value]++;
+    for (int i = 0; i < gray.length; i++) {
+      histogram[gray[i]]++;
     }
 
     final total = gray.length;
 
-    double sum = 0;
+    int sum = 0;
 
     for (int i = 0; i < 256; i++) {
       sum += i * histogram[i];
     }
 
-    double sumBackground = 0;
-
+    int sumBackground = 0;
     int weightBackground = 0;
 
-    double maxVariance = -1;
-
     int bestThreshold = 128;
+
+    // به جای double variance،
+    // از double فقط در محاسبه نهایی استفاده می‌کنیم.
+    double maxVariance = -1;
 
     for (int threshold = 0; threshold < 256; threshold++) {
       weightBackground += histogram[threshold];
@@ -241,26 +337,37 @@ class DocumentDetector {
     int width,
     int height,
   ) {
-    final visited = Uint8List(binary.length);
+    final length = binary.length;
 
-    final queue = Int32List(binary.length);
+    final visited = Uint8List(length);
+
+    final queue = Int32List(length);
 
     _Component? best;
 
-    for (int y = 0; y < height; y++) {
-      for (int x = 0; x < width; x++) {
-        final start = y * width + x;
+    final imageArea = width * height;
 
-        if (binary[start] == 0 || visited[start] != 0) {
+    // برای جلوگیری از بررسی Componentهای بسیار کوچک
+    // حداقل مساحت لازم را از قبل حساب می‌کنیم.
+    final minArea = (imageArea * minComponentRatio).round();
+
+    for (int y = 0; y < height; y++) {
+      int index = y * width;
+
+      for (int x = 0; x < width; x++, index++) {
+        if (binary[index] == 0 || visited[index] != 0) {
           continue;
         }
+
+        // ---------------------------------------------------
+        // BFS
+        // ---------------------------------------------------
 
         int head = 0;
         int tail = 0;
 
-        queue[tail++] = start;
-
-        visited[start] = 1;
+        queue[tail++] = index;
+        visited[index] = 1;
 
         int area = 0;
 
@@ -282,99 +389,92 @@ class DocumentDetector {
         int blX = x;
         int blY = y;
 
+        // ---------------------------------------------------
+        // Boundary
+        //
+        // معمولاً تعداد نقاط مرزی زیاد است.
+        // سقف می‌گذاریم تا حافظه و Fit سریع‌تر شود.
+        // ---------------------------------------------------
+
         final boundary = <Offset>[];
 
         while (head < tail) {
-          final index = queue[head++];
+          final current = queue[head++];
 
-          final px = index % width;
-
-          final py = index ~/ width;
+          // به جای % و ~/ در هر پیکسل،
+          // از تقسیم فقط یک بار استفاده می‌کنیم.
+          final py = current ~/ width;
+          final px = current - py * width;
 
           area++;
 
-          minX = math.min(minX, px);
+          if (px < minX) minX = px;
+          if (px > maxX) maxX = px;
+          if (py < minY) minY = py;
+          if (py > maxY) maxY = py;
 
-          maxX = math.max(maxX, px);
+          // -------------------------------------------------
+          // Rough corners
+          // -------------------------------------------------
 
-          minY = math.min(minY, py);
+          final sum = px + py;
 
-          maxY = math.max(maxY, py);
-
-          // ---------------------------------------------------
-          // تقریبی‌ترین چهار گوشه
-          // ---------------------------------------------------
-
-          if (px + py < tlX + tlY) {
+          if (sum < tlX + tlY) {
             tlX = px;
             tlY = py;
           }
 
-          if (px - py > trX - trY) {
+          final diff = px - py;
+
+          if (diff > trX - trY) {
             trX = px;
             trY = py;
           }
 
-          if (px + py > brX + brY) {
+          if (sum > brX + brY) {
             brX = px;
             brY = py;
           }
 
-          if (px - py < blX - blY) {
+          if (diff < blX - blY) {
             blX = px;
             blY = py;
           }
 
-          // ---------------------------------------------------
-          // آیا این Pixel روی مرز Component است؟
-          // ---------------------------------------------------
+          // -------------------------------------------------
+          // Boundary
+          // -------------------------------------------------
 
           bool isBoundary = false;
 
-          // بالا
-          if (py == 0) {
+          if (py == 0 || binary[current - width] == 0) {
             isBoundary = true;
-          } else if (binary[index - width] == 0) {
+          } else if (py == height - 1 || binary[current + width] == 0) {
             isBoundary = true;
-          }
-
-          // پایین
-          if (!isBoundary) {
-            if (py == height - 1) {
-              isBoundary = true;
-            } else if (binary[index + width] == 0) {
-              isBoundary = true;
-            }
-          }
-
-          // چپ
-          if (!isBoundary) {
-            if (px == 0) {
-              isBoundary = true;
-            } else if (binary[index - 1] == 0) {
-              isBoundary = true;
-            }
-          }
-
-          // راست
-          if (!isBoundary) {
-            if (px == width - 1) {
-              isBoundary = true;
-            } else if (binary[index + 1] == 0) {
-              isBoundary = true;
-            }
+          } else if (px == 0 || binary[current - 1] == 0) {
+            isBoundary = true;
+          } else if (px == width - 1 || binary[current + 1] == 0) {
+            isBoundary = true;
           }
 
           if (isBoundary) {
-            boundary.add(Offset(px.toDouble(), py.toDouble()));
+            // اگر تعداد خیلی زیاد شد، همه را نگه نمی‌داریم.
+            //
+            // اینجا با sampling ساده بخشی از نقاط حفظ می‌شوند.
+            if (boundary.length < 5000) {
+              boundary.add(Offset(px.toDouble(), py.toDouble()));
+            } else if ((area & 3) == 0) {
+              // حدوداً هر 4 نقطه یکی
+              boundary.add(Offset(px.toDouble(), py.toDouble()));
+            }
           }
 
-          // ---------------------------------------------------
-          // BFS - بالا
-          // ---------------------------------------------------
+          // -------------------------------------------------
+          // Neighbor - Up
+          // -------------------------------------------------
 
           if (py > 0) {
-            final next = index - width;
+            final next = current - width;
 
             if (binary[next] != 0 && visited[next] == 0) {
               visited[next] = 1;
@@ -382,12 +482,12 @@ class DocumentDetector {
             }
           }
 
-          // ---------------------------------------------------
-          // BFS - پایین
-          // ---------------------------------------------------
+          // -------------------------------------------------
+          // Neighbor - Down
+          // -------------------------------------------------
 
           if (py < height - 1) {
-            final next = index + width;
+            final next = current + width;
 
             if (binary[next] != 0 && visited[next] == 0) {
               visited[next] = 1;
@@ -395,12 +495,12 @@ class DocumentDetector {
             }
           }
 
-          // ---------------------------------------------------
-          // BFS - چپ
-          // ---------------------------------------------------
+          // -------------------------------------------------
+          // Neighbor - Left
+          // -------------------------------------------------
 
           if (px > 0) {
-            final next = index - 1;
+            final next = current - 1;
 
             if (binary[next] != 0 && visited[next] == 0) {
               visited[next] = 1;
@@ -408,12 +508,12 @@ class DocumentDetector {
             }
           }
 
-          // ---------------------------------------------------
-          // BFS - راست
-          // ---------------------------------------------------
+          // -------------------------------------------------
+          // Neighbor - Right
+          // -------------------------------------------------
 
           if (px < width - 1) {
-            final next = index + 1;
+            final next = current + 1;
 
             if (binary[next] != 0 && visited[next] == 0) {
               visited[next] = 1;
@@ -422,23 +522,24 @@ class DocumentDetector {
           }
         }
 
+        // ---------------------------------------------------
+        // Component خیلی کوچک است
+        // ---------------------------------------------------
+
+        if (area < minArea) {
+          continue;
+        }
+
         final component = _Component(
           area: area,
-
           minX: minX,
           maxX: maxX,
-
           minY: minY,
           maxY: maxY,
-
           topLeft: Offset(tlX.toDouble(), tlY.toDouble()),
-
           topRight: Offset(trX.toDouble(), trY.toDouble()),
-
           bottomRight: Offset(brX.toDouble(), brY.toDouble()),
-
           bottomLeft: Offset(blX.toDouble(), blY.toDouble()),
-
           boundary: boundary,
         );
 
@@ -465,7 +566,7 @@ class DocumentDetector {
 
     final candidateRatio = candidate.area / imageArea;
 
-    if (candidateRatio < 0.10) {
+    if (candidateRatio < minComponentRatio) {
       return false;
     }
 
@@ -474,10 +575,6 @@ class DocumentDetector {
     }
 
     final currentRatio = current.area / imageArea;
-
-    double candidateScore = candidateRatio * 100;
-
-    double currentScore = currentRatio * 100;
 
     final candidateWidth = candidate.maxX - candidate.minX + 1;
 
@@ -501,9 +598,9 @@ class DocumentDetector {
       (currentAspect - 1.414).abs(),
     );
 
-    candidateScore -= candidateAspectError * 20;
+    final candidateScore = candidateRatio * 100 - candidateAspectError * 20;
 
-    currentScore -= currentAspectError * 20;
+    final currentScore = currentRatio * 100 - currentAspectError * 20;
 
     return candidateScore > currentScore;
   }
@@ -532,8 +629,7 @@ class DocumentDetector {
   }
 
   // ---------------------------------------------------------------------------
-  // IMPORTANT:
-  // Refine corners using fitted lines
+  // Refine corners
   // ---------------------------------------------------------------------------
 
   static DocumentCorners? _refineCorners(
@@ -542,15 +638,19 @@ class DocumentDetector {
     int width,
     int height,
   ) {
-    if (boundary.length < 50) {
+    if (boundary.length < 40) {
       return null;
     }
 
-    final points = _samplePoints(boundary, 3000);
+    final points = _samplePoints(boundary, maxRefinePoints);
 
     final minDimension = math.min(width, height);
 
-    final maxDistance = math.max(8.0, minDimension * 0.035);
+    final maxDistance = math.max(7.0, minDimension * 0.032);
+
+    // -------------------------------------------------------
+    // پیدا کردن نقاط نزدیک هر ضلع
+    // -------------------------------------------------------
 
     final topPoints = _pointsNearSegment(
       points,
@@ -580,19 +680,20 @@ class DocumentDetector {
       maxDistance,
     );
 
-    if (topPoints.length < 10 ||
-        rightPoints.length < 10 ||
-        bottomPoints.length < 10 ||
-        leftPoints.length < 10) {
+    if (topPoints.length < 8 ||
+        rightPoints.length < 8 ||
+        bottomPoints.length < 8 ||
+        leftPoints.length < 8) {
       return null;
     }
 
+    // -------------------------------------------------------
+    // Fit
+    // -------------------------------------------------------
+
     final topLine = _fitLine(topPoints);
-
     final rightLine = _fitLine(rightPoints);
-
     final bottomLine = _fitLine(bottomPoints);
-
     final leftLine = _fitLine(leftPoints);
 
     if (topLine == null ||
@@ -601,6 +702,10 @@ class DocumentDetector {
         leftLine == null) {
       return null;
     }
+
+    // -------------------------------------------------------
+    // Intersection
+    // -------------------------------------------------------
 
     final topLeft = _intersection(topLine, leftLine);
 
@@ -628,8 +733,10 @@ class DocumentDetector {
       return null;
     }
 
-    // اگر گوشه جدید بیش از حد از گوشه تقریبی فاصله دارد،
-    // احتمالاً Fit اشتباه انجام شده است.
+    // -------------------------------------------------------
+    // جلوگیری از حرکت غیرمنطقی گوشه‌ها
+    // -------------------------------------------------------
+
     final maxCornerMovement = minDimension * 0.12;
 
     if ((refined.topLeft - rough.topLeft).distance > maxCornerMovement) {
@@ -661,13 +768,15 @@ class DocumentDetector {
       return points;
     }
 
-    final result = <Offset>[];
+    final result = <Offset>[
+      // نقطه‌ها را به صورت تقریبی یکنواخت برمی‌داریم.
+    ];
 
     final step = points.length / maxPoints;
 
     double index = 0;
 
-    while (index < points.length) {
+    while (index < points.length && result.length < maxPoints) {
       result.add(points[index.floor()]);
 
       index += step;
@@ -677,7 +786,7 @@ class DocumentDetector {
   }
 
   // ---------------------------------------------------------------------------
-  // Find points near a segment
+  // Find points near segment
   // ---------------------------------------------------------------------------
 
   static List<Offset> _pointsNearSegment(
@@ -688,10 +797,40 @@ class DocumentDetector {
   ) {
     final result = <Offset>[];
 
-    for (final point in points) {
-      final distance = _pointToSegmentDistance(point, a, b);
+    final abx = b.dx - a.dx;
+    final aby = b.dy - a.dy;
 
-      if (distance <= maxDistance) {
+    final lengthSquared = abx * abx + aby * aby;
+
+    if (lengthSquared <= 0.000001) {
+      return result;
+    }
+
+    final maxDistanceSquared = maxDistance * maxDistance;
+
+    for (final point in points) {
+      final apx = point.dx - a.dx;
+      final apy = point.dy - a.dy;
+
+      var t = (apx * abx + apy * aby) / lengthSquared;
+
+      if (t < 0) {
+        t = 0;
+      } else if (t > 1) {
+        t = 1;
+      }
+
+      final projectionX = a.dx + abx * t;
+
+      final projectionY = a.dy + aby * t;
+
+      final dx = point.dx - projectionX;
+
+      final dy = point.dy - projectionY;
+
+      final distanceSquared = dx * dx + dy * dy;
+
+      if (distanceSquared <= maxDistanceSquared) {
         result.add(point);
       }
     }
@@ -700,31 +839,7 @@ class DocumentDetector {
   }
 
   // ---------------------------------------------------------------------------
-  // Point -> segment distance
-  // ---------------------------------------------------------------------------
-
-  static double _pointToSegmentDistance(Offset p, Offset a, Offset b) {
-    final ab = b - a;
-
-    final lengthSquared = ab.dx * ab.dx + ab.dy * ab.dy;
-
-    if (lengthSquared == 0) {
-      return (p - a).distance;
-    }
-
-    final ap = p - a;
-
-    double t = (ap.dx * ab.dx + ap.dy * ab.dy) / lengthSquared;
-
-    t = t.clamp(0.0, 1.0);
-
-    final projection = Offset(a.dx + ab.dx * t, a.dy + ab.dy * t);
-
-    return (p - projection).distance;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Fit infinite line using PCA
+  // Fit line using PCA
   // ---------------------------------------------------------------------------
 
   static _Line? _fitLine(List<Offset> points) {
@@ -740,8 +855,10 @@ class DocumentDetector {
       meanY += point.dy;
     }
 
-    meanX /= points.length;
-    meanY /= points.length;
+    final inverseCount = 1.0 / points.length;
+
+    meanX *= inverseCount;
+    meanY *= inverseCount;
 
     double xx = 0;
     double yy = 0;
@@ -757,19 +874,16 @@ class DocumentDetector {
       xy += dx * dy;
     }
 
-    if (xx + yy == 0) {
+    if (xx + yy <= 0.000001) {
       return null;
     }
 
-    // جهت اصلی خط
     final angle = 0.5 * math.atan2(2 * xy, xx - yy);
 
     final dx = math.cos(angle);
 
     final dy = math.sin(angle);
 
-    // خط:
-    // ax + by + c = 0
     final a = -dy;
     final b = dx;
 
@@ -805,27 +919,39 @@ class DocumentDetector {
   // ---------------------------------------------------------------------------
 
   static bool _pointsValid(DocumentCorners c, int width, int height) {
-    final points = [c.topLeft, c.topRight, c.bottomRight, c.bottomLeft];
+    final points = <Offset>[c.topLeft, c.topRight, c.bottomRight, c.bottomLeft];
+
+    final maxX = width * 1.05;
+
+    final maxY = height * 1.05;
+
+    final minX = -width * 0.05;
+
+    final minY = -height * 0.05;
 
     for (final p in points) {
       if (!p.dx.isFinite || !p.dy.isFinite) {
         return false;
       }
 
-      // کمی اجازه می‌دهیم نقطه از تصویر بیرون برود
-      if (p.dx < -width * 0.05 ||
-          p.dy < -height * 0.05 ||
-          p.dx > width * 1.05 ||
-          p.dy > height * 1.05) {
+      if (p.dx < minX || p.dy < minY || p.dx > maxX || p.dy > maxY) {
         return false;
       }
     }
+
+    // -------------------------------------------------------
+    // Area
+    // -------------------------------------------------------
 
     final area = _polygonArea(points);
 
     if (area < width * height * 0.10) {
       return false;
     }
+
+    // -------------------------------------------------------
+    // Edge lengths
+    // -------------------------------------------------------
 
     final w1 = _distance(c.topLeft, c.topRight);
 
@@ -842,18 +968,23 @@ class DocumentDetector {
       return false;
     }
 
-    final crosses = [
-      _cross(c.topLeft, c.topRight, c.bottomRight),
-      _cross(c.topRight, c.bottomRight, c.bottomLeft),
-      _cross(c.bottomRight, c.bottomLeft, c.topLeft),
-      _cross(c.bottomLeft, c.topLeft, c.topRight),
-    ];
+    // -------------------------------------------------------
+    // Convexity
+    // -------------------------------------------------------
 
-    final positive = crosses.every((value) => value > 0);
+    final cross1 = _cross(c.topLeft, c.topRight, c.bottomRight);
 
-    final negative = crosses.every((value) => value < 0);
+    final cross2 = _cross(c.topRight, c.bottomRight, c.bottomLeft);
 
-    return positive || negative;
+    final cross3 = _cross(c.bottomRight, c.bottomLeft, c.topLeft);
+
+    final cross4 = _cross(c.bottomLeft, c.topLeft, c.topRight);
+
+    final allPositive = cross1 > 0 && cross2 > 0 && cross3 > 0 && cross4 > 0;
+
+    final allNegative = cross1 < 0 && cross2 < 0 && cross3 < 0 && cross4 < 0;
+
+    return allPositive || allNegative;
   }
 
   // ---------------------------------------------------------------------------
@@ -874,12 +1005,12 @@ class DocumentDetector {
 
     final areaRatio = c.area / imageArea;
 
-    double score = 0;
+    double score = areaRatio * 100;
 
-    // مساحت
-    score += areaRatio * 100;
+    // -------------------------------------------------------
+    // Width / Height
+    // -------------------------------------------------------
 
-    // ابعاد
     final width1 = _distance(c.topLeft, c.topRight);
 
     final width2 = _distance(c.bottomLeft, c.bottomRight);
@@ -888,9 +1019,9 @@ class DocumentDetector {
 
     final height2 = _distance(c.topRight, c.bottomRight);
 
-    final avgWidth = (width1 + width2) / 2;
+    final avgWidth = (width1 + width2) * 0.5;
 
-    final avgHeight = (height1 + height2) / 2;
+    final avgHeight = (height1 + height2) * 0.5;
 
     if (avgHeight <= 0) {
       return double.negativeInfinity;
@@ -906,62 +1037,104 @@ class DocumentDetector {
 
     score -= aspectError * 35;
 
-    // زاویه‌ها
-    final angles = [
-      _angle(c.topLeft, c.topRight, c.bottomRight),
-      _angle(c.topRight, c.bottomRight, c.bottomLeft),
-      _angle(c.bottomRight, c.bottomLeft, c.topLeft),
-      _angle(c.bottomLeft, c.topLeft, c.topRight),
-    ];
+    // -------------------------------------------------------
+    // Parallel edges
+    // -------------------------------------------------------
 
-    double angleError = 0;
+    final maxWidth = math.max(width1, width2);
 
-    for (final angle in angles) {
-      angleError += (angle - math.pi / 2).abs();
+    final maxHeight = math.max(height1, height2);
+
+    if (maxWidth > 0) {
+      score -= ((width1 - width2).abs() / maxWidth) * 20;
     }
 
-    score -= angleError * 20;
+    if (maxHeight > 0) {
+      score -= ((height1 - height2).abs() / maxHeight) * 20;
+    }
 
-    // موازی بودن اضلاع
-    final widthError = (width1 - width2).abs() / math.max(width1, width2);
+    // -------------------------------------------------------
+    // زاویه‌ها
+    //
+    // فقط زمانی محاسبه می‌کنیم که score هنوز منطقی است.
+    // -------------------------------------------------------
 
-    final heightError = (height1 - height2).abs() / math.max(height1, height2);
+    if (score > 20) {
+      final angle1 = _angle(c.topLeft, c.topRight, c.bottomRight);
 
-    score -= widthError * 20;
+      final angle2 = _angle(c.topRight, c.bottomRight, c.bottomLeft);
 
-    score -= heightError * 20;
+      final angle3 = _angle(c.bottomRight, c.bottomLeft, c.topLeft);
+
+      final angle4 = _angle(c.bottomLeft, c.topLeft, c.topRight);
+
+      final target = math.pi / 2;
+
+      final angleError =
+          (angle1 - target).abs() +
+          (angle2 - target).abs() +
+          (angle3 - target).abs() +
+          (angle4 - target).abs();
+
+      score -= angleError * 20;
+    }
 
     return score;
   }
 
   // ---------------------------------------------------------------------------
-  // Geometry
+  // Distance
   // ---------------------------------------------------------------------------
 
   static double _distance(Offset a, Offset b) {
-    return (a - b).distance;
+    final dx = a.dx - b.dx;
+
+    final dy = a.dy - b.dy;
+
+    return math.sqrt(dx * dx + dy * dy);
   }
 
+  // ---------------------------------------------------------------------------
+  // Angle
+  // ---------------------------------------------------------------------------
+
   static double _angle(Offset a, Offset b, Offset c) {
-    final ab = a - b;
-    final cb = c - b;
+    final abx = a.dx - b.dx;
 
-    final denominator = ab.distance * cb.distance;
+    final aby = a.dy - b.dy;
 
-    if (denominator == 0) {
+    final cbx = c.dx - b.dx;
+
+    final cby = c.dy - b.dy;
+
+    final abLength = math.sqrt(abx * abx + aby * aby);
+
+    final cbLength = math.sqrt(cbx * cbx + cby * cby);
+
+    final denominator = abLength * cbLength;
+
+    if (denominator <= 0) {
       return 0;
     }
 
-    final dot = ab.dx * cb.dx + ab.dy * cb.dy;
+    final dot = abx * cbx + aby * cby;
 
     final value = (dot / denominator).clamp(-1.0, 1.0);
 
     return math.acos(value);
   }
 
+  // ---------------------------------------------------------------------------
+  // Cross
+  // ---------------------------------------------------------------------------
+
   static double _cross(Offset a, Offset b, Offset c) {
     return (b.dx - a.dx) * (c.dy - a.dy) - (b.dy - a.dy) * (c.dx - a.dx);
   }
+
+  // ---------------------------------------------------------------------------
+  // Polygon Area
+  // ---------------------------------------------------------------------------
 
   static double _polygonArea(List<Offset> points) {
     double area = 0;
@@ -974,12 +1147,23 @@ class DocumentDetector {
       area += a.dx * b.dy - b.dx * a.dy;
     }
 
-    return area.abs() / 2;
+    return area.abs() * 0.5;
   }
 }
 
 // =============================================================================
-// Models
+// Detection Result
+// =============================================================================
+
+class _DetectionResult {
+  final DocumentCorners corners;
+  final _Component component;
+
+  const _DetectionResult({required this.corners, required this.component});
+}
+
+// =============================================================================
+// Component
 // =============================================================================
 
 class _Component {
@@ -999,7 +1183,7 @@ class _Component {
 
   final List<Offset> boundary;
 
-  _Component({
+  const _Component({
     required this.area,
     required this.minX,
     required this.maxX,
@@ -1013,10 +1197,14 @@ class _Component {
   });
 }
 
+// =============================================================================
+// Line
+// =============================================================================
+
 class _Line {
   final double a;
   final double b;
   final double c;
 
-  _Line({required this.a, required this.b, required this.c});
+  const _Line({required this.a, required this.b, required this.c});
 }
