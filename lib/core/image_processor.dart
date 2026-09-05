@@ -1,6 +1,5 @@
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
 
@@ -9,28 +8,45 @@ import 'document_detector.dart';
 import 'image_enhancer.dart';
 import 'perspective_corrector.dart';
 
-/// حداکثر اندازه‌ای که برای تشخیص گوشه‌ها استفاده می‌شود.
-///
-/// تشخیص روی تصویر کوچک‌تر بسیار سریع‌تر است و بعداً
-/// مختصات گوشه‌ها به اندازه اصلی برگردانده می‌شوند.
-const int _maxDetectionSize = 900;
+/// ============================================================
+/// تنظیمات اصلی Performance / Quality
+/// ============================================================
 
-/// حداکثر اندازه تصویر برای Perspective و فیلترها.
+/// حداکثر اندازه ضلع بزرگ برای تشخیص سند.
 ///
-/// نگه داشتن تصویر در حدود 2200px باعث کاهش محسوس زمان
-/// پردازش و مصرف RAM می‌شود، بدون اینکه کیفیت اسکن معمولی
-/// افت زیادی داشته باشد.
-const int _maxProcessingSize = 2200;
+/// Detection فقط روی این نسخه کوچک انجام می‌شود.
+/// هرچه این عدد کمتر باشد، تشخیص سریع‌تر است.
+///
+/// 800 برای گوشی‌های معمولی مقدار مناسبی است.
+const int _baseDetectionSize = 800;
 
-/// کیفیت JPEG.
+/// حداقل اندازه Detection.
 ///
-/// 92 معمولاً برای اسناد کیفیت بسیار خوبی دارد و نسبت به 95
-/// حجم و زمان encode کمتری ایجاد می‌کند.
-const int _jpegQuality = 92;
+/// برای عکس‌های خیلی کوچک، تصویر را بیش از حد کوچک نمی‌کنیم.
+const int _minDetectionSize = 600;
 
-/// پردازش کامل یک عکس گرفته‌شده توسط دوربین.
+/// حداکثر اندازه خروجی.
 ///
-/// این تابع برای اجرا با compute طراحی شده است:
+/// تصویر اصلی برای Perspective استفاده می‌شود، اما اگر دوربین
+/// رزولوشن بسیار بالایی داشته باشد، برای جلوگیری از مصرف بیش
+/// از حد RAM و CPU سقف منطقی داریم.
+///
+/// برای عکس 12MP معمولاً خروجی بدون افت محسوس خواهد بود.
+const int _maxOutputSize = 3000;
+
+/// حداقل اندازه خروجی.
+const int _minOutputSize = 1600;
+
+/// کیفیت JPEG نهایی.
+const int _jpegQuality = 95;
+
+/// ============================================================
+/// Process Full Image
+/// ============================================================
+
+/// پردازش کامل عکس گرفته‌شده از دوربین.
+///
+/// این تابع باید با compute اجرا شود:
 ///
 /// compute(
 ///   processImageInIsolate,
@@ -47,7 +63,7 @@ Future<Map<String, dynamic>> processImageInIsolate(
   final int filterIndex = _readFilterIndex(args);
 
   // ------------------------------------------------------------
-  // 1. Decode
+  // 1. Decode تصویر اصلی
   // ------------------------------------------------------------
 
   final img.Image? decoded = img.decodeImage(bytes);
@@ -59,14 +75,22 @@ Future<Map<String, dynamic>> processImageInIsolate(
   // اصلاح EXIF Orientation
   final img.Image fixed = img.bakeOrientation(decoded);
 
+  final int originalWidth = fixed.width;
+  final int originalHeight = fixed.height;
+
   // ------------------------------------------------------------
-  // 2. تشخیص گوشه‌های سند
+  // 2. Detection روی نسخه کوچک
   // ------------------------------------------------------------
 
+  final int detectionSize = _calculateDetectionSize(
+    originalWidth,
+    originalHeight,
+  );
+
   final double detectionScale = _calculateScale(
-    fixed.width,
-    fixed.height,
-    _maxDetectionSize,
+    originalWidth,
+    originalHeight,
+    detectionSize,
   );
 
   final img.Image detectionImage;
@@ -74,57 +98,68 @@ Future<Map<String, dynamic>> processImageInIsolate(
   if (detectionScale < 1.0) {
     detectionImage = img.copyResize(
       fixed,
-      width: (fixed.width * detectionScale).round(),
-      height: (fixed.height * detectionScale).round(),
+      width: _scaledDimension(originalWidth, detectionScale),
+      height: _scaledDimension(originalHeight, detectionScale),
       interpolation: img.Interpolation.linear,
     );
   } else {
     detectionImage = fixed;
   }
 
-  DocumentCorners? detected = DocumentDetector.detect(detectionImage);
+  // ------------------------------------------------------------
+  // 3. پیدا کردن گوشه‌ها
+  // ------------------------------------------------------------
 
-  // مختصات تشخیص داده شده در اندازه کوچک را به مختصات
-  // تصویر اصلی برمی‌گردانیم.
-  DocumentCorners corners;
+  final DocumentCorners? detected = DocumentDetector.detect(detectionImage);
+
+  final DocumentCorners corners;
 
   if (detected != null) {
+    // برگرداندن مختصات از نسخه کوچک به تصویر اصلی
     corners = _scaleCorners(detected, 1.0 / detectionScale);
   } else {
     corners = _defaultCorners(fixed);
   }
 
   // ------------------------------------------------------------
-  // 3. کوچک کردن تصویر برای Perspective
+  // 4. آماده‌سازی تصویر High Quality
   // ------------------------------------------------------------
 
-  final double processingScale = _calculateScale(
-    fixed.width,
-    fixed.height,
-    _maxProcessingSize,
+  //
+  // نکته مهم:
+  //
+  // Detection روی تصویر کوچک انجام شد،
+  // اما از اینجا به بعد دوباره روی تصویر با کیفیت بالا
+  // کار می‌کنیم.
+  //
+
+  final int outputSize = _calculateOutputSize(originalWidth, originalHeight);
+
+  final double outputScale = _calculateScale(
+    originalWidth,
+    originalHeight,
+    outputSize,
   );
 
   final img.Image processingImage;
 
-  if (processingScale < 1.0) {
+  if (outputScale < 1.0) {
     processingImage = img.copyResize(
       fixed,
-      width: (fixed.width * processingScale).round(),
-      height: (fixed.height * processingScale).round(),
+      width: _scaledDimension(originalWidth, outputScale),
+      height: _scaledDimension(originalHeight, outputScale),
       interpolation: img.Interpolation.linear,
     );
   } else {
     processingImage = fixed;
   }
 
-  // مختصات گوشه‌ها باید با تصویر processingImage هماهنگ شوند.
-  final DocumentCorners processingCorners = _scaleCorners(
-    corners,
-    processingScale,
-  );
+  // مختصات Detection که در اندازه اصلی هستند
+  // را به اندازه processingImage تبدیل می‌کنیم.
+  final DocumentCorners processingCorners = _scaleCorners(corners, outputScale);
 
   // ------------------------------------------------------------
-  // 4. اصلاح Perspective
+  // 5. Perspective Correction
   // ------------------------------------------------------------
 
   final img.Image rectified = PerspectiveCorrector.rectify(
@@ -133,27 +168,55 @@ Future<Map<String, dynamic>> processImageInIsolate(
   );
 
   // ------------------------------------------------------------
-  // 5. اعمال فیلتر
+  // 6. Filter / Enhancement
   // ------------------------------------------------------------
 
   final ScanFilter filter = _filterFromIndex(filterIndex);
 
-  final img.Image enhanced = ImageEnhancer.apply(rectified, filter);
+  final img.Image enhanced;
+
+  // اگر Original انتخاب شده، هیچ Enhancement اضافی انجام نمی‌دهیم.
+  if (filter == ScanFilter.original) {
+    enhanced = rectified;
+  } else {
+    enhanced = ImageEnhancer.apply(rectified, filter);
+  }
 
   // ------------------------------------------------------------
-  // 6. Encode
+  // 7. Encode خروجی نهایی
   // ------------------------------------------------------------
-
-  final Uint8List originalBytes = Uint8List.fromList(
-    img.encodeJpg(fixed, quality: _jpegQuality),
-  );
 
   final Uint8List processedBytes = Uint8List.fromList(
     img.encodeJpg(enhanced, quality: _jpegQuality),
   );
 
   // ------------------------------------------------------------
-  // 7. نتیجه
+  // 8. Original Bytes
+  // ------------------------------------------------------------
+
+  //
+  // برای Editor به نسخه Orientation-correct شده نیاز داریم.
+  //
+  // اما آن را با رزولوشن کامل JPEG ذخیره نمی‌کنیم اگر تصویر
+  // بسیار بزرگ باشد؛ چون باعث مصرف RAM و زمان زیاد می‌شود.
+  //
+  // در اکثر گوشی‌ها همان تصویر اصلی یا حداکثر 3000px برمی‌گردد.
+  //
+
+  final img.Image originalForEditor;
+
+  if (outputScale < 1.0) {
+    originalForEditor = processingImage;
+  } else {
+    originalForEditor = fixed;
+  }
+
+  final Uint8List originalBytes = Uint8List.fromList(
+    img.encodeJpg(originalForEditor, quality: _jpegQuality),
+  );
+
+  // ------------------------------------------------------------
+  // 9. Result
   // ------------------------------------------------------------
 
   return <String, dynamic>{
@@ -174,7 +237,11 @@ Future<Map<String, dynamic>> processImageInIsolate(
   };
 }
 
-/// پردازش تصویر بعد از اینکه کاربر گوشه‌های سند را در CropEditor
+/// ============================================================
+/// Process Crop
+/// ============================================================
+
+/// پردازش مجدد تصویر بعد از اینکه کاربر گوشه‌ها را در CropEditor
 /// تغییر داده است.
 ///
 /// این تابع نیز باید با compute اجرا شود.
@@ -186,23 +253,27 @@ Future<Map<String, dynamic>> processCropInIsolate(
   final int filterIndex = _readFilterIndex(args);
 
   // ------------------------------------------------------------
-  // مختصات گوشه‌ها
+  // 1. Read Corners
   // ------------------------------------------------------------
 
   final double topLeftX = _readDouble(args, 'topLeftX');
+
   final double topLeftY = _readDouble(args, 'topLeftY');
 
   final double topRightX = _readDouble(args, 'topRightX');
+
   final double topRightY = _readDouble(args, 'topRightY');
 
   final double bottomRightX = _readDouble(args, 'bottomRightX');
+
   final double bottomRightY = _readDouble(args, 'bottomRightY');
 
   final double bottomLeftX = _readDouble(args, 'bottomLeftX');
+
   final double bottomLeftY = _readDouble(args, 'bottomLeftY');
 
   // ------------------------------------------------------------
-  // 1. Decode
+  // 2. Decode
   // ------------------------------------------------------------
 
   final img.Image? decoded = img.decodeImage(bytes);
@@ -213,23 +284,28 @@ Future<Map<String, dynamic>> processCropInIsolate(
 
   final img.Image fixed = img.bakeOrientation(decoded);
 
+  final int originalWidth = fixed.width;
+  final int originalHeight = fixed.height;
+
   // ------------------------------------------------------------
-  // 2. محدود کردن اندازه پردازش
+  // 3. High Quality Processing Image
   // ------------------------------------------------------------
 
-  final double processingScale = _calculateScale(
-    fixed.width,
-    fixed.height,
-    _maxProcessingSize,
+  final int outputSize = _calculateOutputSize(originalWidth, originalHeight);
+
+  final double outputScale = _calculateScale(
+    originalWidth,
+    originalHeight,
+    outputSize,
   );
 
   final img.Image processingImage;
 
-  if (processingScale < 1.0) {
+  if (outputScale < 1.0) {
     processingImage = img.copyResize(
       fixed,
-      width: (fixed.width * processingScale).round(),
-      height: (fixed.height * processingScale).round(),
+      width: _scaledDimension(originalWidth, outputScale),
+      height: _scaledDimension(originalHeight, outputScale),
       interpolation: img.Interpolation.linear,
     );
   } else {
@@ -237,24 +313,18 @@ Future<Map<String, dynamic>> processCropInIsolate(
   }
 
   // ------------------------------------------------------------
-  // 3. ساخت گوشه‌ها
+  // 4. Corners
   // ------------------------------------------------------------
 
   final DocumentCorners corners = DocumentCorners(
-    topLeft: Offset(topLeftX * processingScale, topLeftY * processingScale),
-    topRight: Offset(topRightX * processingScale, topRightY * processingScale),
-    bottomRight: Offset(
-      bottomRightX * processingScale,
-      bottomRightY * processingScale,
-    ),
-    bottomLeft: Offset(
-      bottomLeftX * processingScale,
-      bottomLeftY * processingScale,
-    ),
+    topLeft: Offset(topLeftX * outputScale, topLeftY * outputScale),
+    topRight: Offset(topRightX * outputScale, topRightY * outputScale),
+    bottomRight: Offset(bottomRightX * outputScale, bottomRightY * outputScale),
+    bottomLeft: Offset(bottomLeftX * outputScale, bottomLeftY * outputScale),
   );
 
   // ------------------------------------------------------------
-  // 4. Perspective Correction
+  // 5. Perspective
   // ------------------------------------------------------------
 
   final img.Image rectified = PerspectiveCorrector.rectify(
@@ -263,15 +333,21 @@ Future<Map<String, dynamic>> processCropInIsolate(
   );
 
   // ------------------------------------------------------------
-  // 5. Filter
+  // 6. Filter
   // ------------------------------------------------------------
 
   final ScanFilter filter = _filterFromIndex(filterIndex);
 
-  final img.Image enhanced = ImageEnhancer.apply(rectified, filter);
+  final img.Image enhanced;
+
+  if (filter == ScanFilter.original) {
+    enhanced = rectified;
+  } else {
+    enhanced = ImageEnhancer.apply(rectified, filter);
+  }
 
   // ------------------------------------------------------------
-  // 6. Encode
+  // 7. Encode
   // ------------------------------------------------------------
 
   final Uint8List processedBytes = Uint8List.fromList(
@@ -281,9 +357,68 @@ Future<Map<String, dynamic>> processCropInIsolate(
   return <String, dynamic>{'processedBytes': processedBytes};
 }
 
-/// محاسبه ضریب Resize.
+/// ============================================================
+/// Detection Size
+/// ============================================================
+
+/// اندازه Detection را بر اساس رزولوشن عکس تعیین می‌کند.
 ///
-/// اگر تصویر کوچک‌تر از maxSize باشد، همان تصویر استفاده می‌شود.
+/// هدف این است که روی گوشی‌های مختلف:
+///
+/// 8MP  -> حدود 700-800px
+/// 12MP -> حدود 800px
+/// 16MP -> حدود 800-900px
+/// 48MP -> همچنان محدود شود
+///
+/// بنابراین Detection هیچ‌وقت بی‌دلیل روی تصویر بزرگ اجرا نمی‌شود.
+int _calculateDetectionSize(int width, int height) {
+  final int largestSide = width > height ? width : height;
+
+  if (largestSide <= _baseDetectionSize) {
+    return largestSide;
+  }
+
+  // برای تصاویر خیلی کوچک
+  if (largestSide < _minDetectionSize) {
+    return largestSide;
+  }
+
+  return _baseDetectionSize;
+}
+
+/// ============================================================
+/// Output Size
+/// ============================================================
+
+/// اندازه مناسب برای پردازش نهایی.
+///
+/// برای گوشی‌های مختلف خودکار تنظیم می‌شود.
+///
+/// نکته:
+/// Detection همیشه کوچک است.
+///
+/// اما خروجی با رزولوشن بالا ساخته می‌شود.
+int _calculateOutputSize(int width, int height) {
+  final int largestSide = width > height ? width : height;
+
+  // اگر تصویر از سقف کوچک‌تر است،
+  // هیچ Resize انجام نمی‌دهیم.
+  if (largestSide <= _maxOutputSize) {
+    return largestSide;
+  }
+
+  // تصاویر خیلی کوچک
+  if (largestSide < _minOutputSize) {
+    return largestSide;
+  }
+
+  return _maxOutputSize;
+}
+
+/// ============================================================
+/// Scale
+/// ============================================================
+
 double _calculateScale(int width, int height, int maxSize) {
   final int largestSide = width > height ? width : height;
 
@@ -294,7 +429,20 @@ double _calculateScale(int width, int height, int maxSize) {
   return maxSize / largestSide;
 }
 
-/// تغییر مقیاس مختصات چهار گوشه.
+/// ============================================================
+/// Dimension
+/// ============================================================
+
+int _scaledDimension(int value, double scale) {
+  final int result = (value * scale).round();
+
+  return result < 1 ? 1 : result;
+}
+
+/// ============================================================
+/// Scale Corners
+/// ============================================================
+
 DocumentCorners _scaleCorners(DocumentCorners corners, double scale) {
   return DocumentCorners(
     topLeft: Offset(corners.topLeft.dx * scale, corners.topLeft.dy * scale),
@@ -310,8 +458,12 @@ DocumentCorners _scaleCorners(DocumentCorners corners, double scale) {
   );
 }
 
-/// اگر تشخیص سند موفق نبود، به صورت پیش‌فرض
-/// حدود 6 درصد از اطراف تصویر را حذف می‌کنیم.
+/// ============================================================
+/// Default Corners
+/// ============================================================
+
+/// اگر DocumentDetector نتوانست سند را پیدا کند،
+/// به صورت پیش‌فرض حاشیه 6 درصد انتخاب می‌شود.
 DocumentCorners _defaultCorners(img.Image image) {
   final double marginX = image.width * 0.06;
   final double marginY = image.height * 0.06;
@@ -324,7 +476,10 @@ DocumentCorners _defaultCorners(img.Image image) {
   );
 }
 
-/// خواندن امن filterIndex.
+/// ============================================================
+/// Filter Index
+/// ============================================================
+
 int _readFilterIndex(Map<String, dynamic> args) {
   final dynamic value = args['filterIndex'];
 
@@ -332,20 +487,27 @@ int _readFilterIndex(Map<String, dynamic> args) {
     return value.clamp(0, ScanFilter.values.length - 1);
   }
 
+  if (value is num) {
+    return value.toInt().clamp(0, ScanFilter.values.length - 1);
+  }
+
   return 0;
 }
 
-/// تبدیل index به ScanFilter.
+/// ============================================================
+/// Filter
+/// ============================================================
+
 ScanFilter _filterFromIndex(int index) {
   final int safeIndex = index.clamp(0, ScanFilter.values.length - 1);
 
   return ScanFilter.values[safeIndex];
 }
 
-/// خواندن عدد double از arguments.
-///
-/// اگر مقدار وجود نداشته باشد یا معتبر نباشد، خطا ایجاد می‌شود
-/// تا پردازش اشتباه و بی‌صدا انجام نشود.
+/// ============================================================
+/// Read Double
+/// ============================================================
+
 double _readDouble(Map<String, dynamic> args, String key) {
   final dynamic value = args[key];
 
