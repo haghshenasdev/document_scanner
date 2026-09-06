@@ -6,27 +6,12 @@ import 'package:image/image.dart' as img;
 import '../models/document_corners.dart';
 
 class PerspectiveCorrector {
-  // ===========================================================================
-  // تنظیمات Performance
-  // ===========================================================================
-
-  /// حداکثر اندازه تصویر خروجی.
+  /// حداکثر ضلع خروجی.
   ///
-  /// 3000 قبلی برای موبایل نسبتاً سنگین بود.
-  ///
-  /// 2200:
-  /// - کیفیت مناسب برای اسکن A4
-  /// - مصرف RAM کمتر
-  /// - Perspective بسیار سریع‌تر
-  /// - Enhancement سریع‌تر
+  /// برای اسکن A4 مقدار مناسبی بین کیفیت و سرعت است.
   static const int maxDimension = 2200;
 
-  /// حداقل اندازه خروجی
   static const int minDimension = 100;
-
-  // ===========================================================================
-  // Public API
-  // ===========================================================================
 
   static img.Image rectify(img.Image source, DocumentCorners corners) {
     final tl = corners.topLeft;
@@ -34,17 +19,18 @@ class PerspectiveCorrector {
     final br = corners.bottomRight;
     final bl = corners.bottomLeft;
 
-    // =========================================================================
-    // 1. اندازه اضلاع
-    // =========================================================================
+    // ------------------------------------------------------------
+    // اندازه اضلاع
+    // ------------------------------------------------------------
 
     final topWidth = _distance(tl, tr);
+
     final bottomWidth = _distance(bl, br);
 
     final leftHeight = _distance(tl, bl);
+
     final rightHeight = _distance(tr, br);
 
-    // اگر اندازه‌ها غیرمنطقی باشند
     if (topWidth <= 1 ||
         bottomWidth <= 1 ||
         leftHeight <= 1 ||
@@ -52,54 +38,49 @@ class PerspectiveCorrector {
       throw Exception('اندازه گوشه‌های تصویر معتبر نیست');
     }
 
-    // =========================================================================
-    // 2. اندازه متوسط
-    // =========================================================================
+    // ------------------------------------------------------------
+    // اندازه متوسط
+    // ------------------------------------------------------------
 
-    final outputWidth = (topWidth + bottomWidth) * 0.5;
+    final estimatedWidth = (topWidth + bottomWidth) * 0.5;
 
-    final outputHeight = (leftHeight + rightHeight) * 0.5;
+    final estimatedHeight = (leftHeight + rightHeight) * 0.5;
 
-    if (outputWidth <= 1 || outputHeight <= 1) {
+    if (estimatedWidth <= 1 || estimatedHeight <= 1) {
       throw Exception('اندازه خروجی غیرمعتبر است');
     }
 
-    // =========================================================================
-    // 3. نسبت تصویر
-    // =========================================================================
-
-    final aspectRatio = outputWidth / outputHeight;
+    final aspectRatio = estimatedWidth / estimatedHeight;
 
     if (!aspectRatio.isFinite || aspectRatio <= 0) {
       throw Exception('نسبت تصویر غیرمعتبر است');
     }
 
-    // =========================================================================
-    // 4. تعیین اندازه خروجی
-    // =========================================================================
+    // ------------------------------------------------------------
+    // تعیین اندازه خروجی
+    // ------------------------------------------------------------
 
     int width;
     int height;
 
-    if (outputWidth >= outputHeight) {
-      width = math.min(outputWidth.round(), maxDimension);
+    if (estimatedWidth >= estimatedHeight) {
+      width = math.min(estimatedWidth.round(), maxDimension);
 
       height = math.max(minDimension, (width / aspectRatio).round());
     } else {
-      height = math.min(outputHeight.round(), maxDimension);
+      height = math.min(estimatedHeight.round(), maxDimension);
 
       width = math.max(minDimension, (height * aspectRatio).round());
     }
 
-    // =========================================================================
-    // 5. محدودیت نهایی
-    // =========================================================================
+    // ------------------------------------------------------------
+    // محدودیت نهایی
+    // ------------------------------------------------------------
 
     width = math.max(minDimension, width);
 
     height = math.max(minDimension, height);
 
-    // اگر به خاطر محاسبات بالا یکی از ابعاد دوباره از حد مجاز رد شد
     if (width > maxDimension || height > maxDimension) {
       final scale = maxDimension / math.max(width, height);
 
@@ -108,9 +89,9 @@ class PerspectiveCorrector {
       height = math.max(minDimension, (height * scale).round());
     }
 
-    // =========================================================================
-    // 6. بررسی نسبت نهایی
-    // =========================================================================
+    // ------------------------------------------------------------
+    // بررسی نسبت
+    // ------------------------------------------------------------
 
     final finalRatio = width / height;
 
@@ -118,9 +99,9 @@ class PerspectiveCorrector {
       throw Exception('نسبت گوشه‌های انتخاب‌شده غیرطبیعی است');
     }
 
-    // =========================================================================
-    // 7. ساخت تصویر مقصد
-    // =========================================================================
+    // ------------------------------------------------------------
+    // Destination
+    // ------------------------------------------------------------
 
     final destination = img.Image(
       width: width,
@@ -128,20 +109,9 @@ class PerspectiveCorrector {
       numChannels: source.numChannels,
     );
 
-    // =========================================================================
-    // 8. Perspective Correction
-    // =========================================================================
-    //
-    // نکته:
-    //
-    // copyRectify فقط به اندازه destination پیکسل تولید می‌کند.
-    //
-    // بنابراین اگر عکس دوربین مثلاً 4000x3000 باشد ولی خروجی
-    // 2200x1650 باشد، به جای میلیون‌ها پیکسل اضافه،
-    // فقط تصویر مورد نیاز تولید می‌شود.
-    //
-    // این قسمت یکی از مهم‌ترین بهینه‌سازی‌های این نسخه است.
-    // =========================================================================
+    // ------------------------------------------------------------
+    // Perspective
+    // ------------------------------------------------------------
 
     return img.copyRectify(
       source,
@@ -153,10 +123,6 @@ class PerspectiveCorrector {
       toImage: destination,
     );
   }
-
-  // ===========================================================================
-  // Distance
-  // ===========================================================================
 
   static double _distance(Offset a, Offset b) {
     final dx = a.dx - b.dx;
