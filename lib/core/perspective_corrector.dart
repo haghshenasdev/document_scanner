@@ -1,121 +1,128 @@
 import 'dart:math' as math;
+import 'dart:ui';
 
-import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
 
 import '../models/document_corners.dart';
 
 class PerspectiveCorrector {
-  PerspectiveCorrector._();
+  /// حداقل اندازه خروجی
+  static const int minDimension = 100;
 
-  /// ==========================================================
-  /// RECTIFY
-  /// ==========================================================
+  /// حداکثر اندازه خروجی
   ///
-  /// تصویر را با استفاده از چهار گوشه سند صاف می‌کند.
+  /// اگر null باشد، محدودیتی اعمال نمی‌شود.
   ///
-  /// هیچ Resize اجباری روی تصویر ورودی انجام نمی‌شود.
-  /// بنابراین اگر عکس 4000x3000 باشد، Perspective نیز
-  /// روی همان رزولوشن انجام می‌شود.
-  static img.Image rectify(
-    img.Image source,
-    DocumentCorners corners,
-  ) {
-    final points = corners.points;
+  /// برای حفظ حداکثر کیفیت، فعلاً محدودیت سخت 2200 حذف شده
+  /// و اندازه خروجی بر اساس ابعاد واقعی سند محاسبه می‌شود.
+  static const int? maxDimension = null;
 
-    if (points.length != 4) {
-      return source;
+  static img.Image rectify(img.Image source, DocumentCorners corners) {
+    final tl = corners.topLeft;
+    final tr = corners.topRight;
+    final br = corners.bottomRight;
+    final bl = corners.bottomLeft;
+
+    // ------------------------------------------------------------
+    // بررسی گوشه‌ها
+    // ------------------------------------------------------------
+
+    final topWidth = _distance(tl, tr);
+    final bottomWidth = _distance(bl, br);
+
+    final leftHeight = _distance(tl, bl);
+    final rightHeight = _distance(tr, br);
+
+    if (topWidth <= 1 ||
+        bottomWidth <= 1 ||
+        leftHeight <= 1 ||
+        rightHeight <= 1) {
+      throw Exception('اندازه گوشه‌های تصویر معتبر نیست');
     }
 
-    final topLeft = points[0];
-    final topRight = points[1];
-    final bottomRight = points[2];
-    final bottomLeft = points[3];
+    // ------------------------------------------------------------
+    // اندازه واقعی سند
+    // ------------------------------------------------------------
 
-    /// --------------------------------------------------------
-    /// Calculate output width
-    /// --------------------------------------------------------
+    final estimatedWidth = (topWidth + bottomWidth) * 0.5;
+    final estimatedHeight = (leftHeight + rightHeight) * 0.5;
 
-    final topWidth = _distance(
-      topLeft,
-      topRight,
+    if (estimatedWidth <= 1 || estimatedHeight <= 1) {
+      throw Exception('اندازه خروجی غیرمعتبر است');
+    }
+
+    // ------------------------------------------------------------
+    // نسبت تصویر
+    // ------------------------------------------------------------
+
+    final aspectRatio = estimatedWidth / estimatedHeight;
+
+    if (!aspectRatio.isFinite || aspectRatio <= 0) {
+      throw Exception('نسبت تصویر غیرمعتبر است');
+    }
+
+    // ------------------------------------------------------------
+    // تعیین رزولوشن خروجی
+    // ------------------------------------------------------------
+
+    int width = estimatedWidth.round();
+    int height = estimatedHeight.round();
+
+    width = math.max(minDimension, width);
+    height = math.max(minDimension, height);
+
+    // ------------------------------------------------------------
+    // محدودیت اختیاری
+    // ------------------------------------------------------------
+
+    if (maxDimension != null &&
+        (width > maxDimension! || height > maxDimension!)) {
+      final scale = maxDimension! / math.max(width, height);
+
+      width = math.max(minDimension, (width * scale).round());
+
+      height = math.max(minDimension, (height * scale).round());
+    }
+
+    // ------------------------------------------------------------
+    // بررسی نسبت نهایی
+    // ------------------------------------------------------------
+
+    final finalRatio = width / height;
+
+    if (!finalRatio.isFinite || finalRatio < 0.30 || finalRatio > 3.50) {
+      throw Exception('نسبت گوشه‌های انتخاب‌شده غیرطبیعی است');
+    }
+
+    // ------------------------------------------------------------
+    // ساخت تصویر مقصد
+    // ------------------------------------------------------------
+
+    final destination = img.Image(
+      width: width,
+      height: height,
+      numChannels: source.numChannels,
     );
 
-    final bottomWidth = _distance(
-      bottomLeft,
-      bottomRight,
-    );
-
-    final outputWidth =
-        math.max(
-          1,
-          math.max(
-            topWidth,
-            bottomWidth,
-          ).round(),
-        );
-
-    /// --------------------------------------------------------
-    /// Calculate output height
-    /// --------------------------------------------------------
-
-    final leftHeight = _distance(
-      topLeft,
-      bottomLeft,
-    );
-
-    final rightHeight = _distance(
-      topRight,
-      bottomRight,
-    );
-
-    final outputHeight =
-        math.max(
-          1,
-          math.max(
-            leftHeight,
-            rightHeight,
-          ).round(),
-        );
-
-    /// جلوگیری از خروجی‌های غیرواقعی در صورت Detection اشتباه.
-    ///
-    /// این سقف مربوط به رزولوشن نیست؛ فقط از ایجاد تصویر
-    /// غیرمنطقی در اثر مختصات خراب جلوگیری می‌کند.
-    final safeWidth = outputWidth.clamp(
-      1,
-      source.width * 2,
-    );
-
-    final safeHeight = outputHeight.clamp(
-      1,
-      source.height * 2,
-    );
-
-    /// --------------------------------------------------------
-    /// Perspective transform
-    /// --------------------------------------------------------
+    // ------------------------------------------------------------
+    // Perspective Correction
+    // ------------------------------------------------------------
 
     return img.copyRectify(
       source,
-      topLeft,
-      topRight,
-      bottomRight,
-      bottomLeft,
-      width: safeWidth,
-      height: safeHeight,
+      topLeft: img.Point(tl.dx, tl.dy),
+      topRight: img.Point(tr.dx, tr.dy),
+      bottomLeft: img.Point(bl.dx, bl.dy),
+      bottomRight: img.Point(br.dx, br.dy),
+      interpolation: img.Interpolation.linear,
+      toImage: destination,
     );
   }
 
-  static double _distance(
-    Offset a,
-    Offset b,
-  ) {
-    final dx = b.dx - a.dx;
-    final dy = b.dy - a.dy;
+  static double _distance(Offset a, Offset b) {
+    final dx = a.dx - b.dx;
+    final dy = a.dy - b.dy;
 
-    return math.sqrt(
-      dx * dx + dy * dy,
-    );
+    return math.sqrt(dx * dx + dy * dy);
   }
 }
