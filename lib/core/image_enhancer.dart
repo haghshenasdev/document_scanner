@@ -1,13 +1,29 @@
+import 'dart:math' as math;
+
 import 'package:image/image.dart' as img;
 
-enum ScanFilter { original, document, sharp, grayscale, blackWhite, magicColor }
+/// ============================================================
+/// SCAN FILTER
+/// ============================================================
+
+enum ScanFilter {
+  original,
+  document,
+  grayscale,
+  blackWhite,
+}
+
+/// ============================================================
+/// IMAGE ENHANCER
+/// ============================================================
 
 class ImageEnhancer {
-  // ============================================================
-  // Public API
-  // ============================================================
+  ImageEnhancer._();
 
-  static img.Image apply(img.Image source, ScanFilter filter) {
+  static img.Image apply(
+    img.Image source,
+    ScanFilter filter,
+  ) {
     switch (filter) {
       case ScanFilter.original:
         return source;
@@ -15,103 +31,126 @@ class ImageEnhancer {
       case ScanFilter.document:
         return _document(source);
 
-      case ScanFilter.sharp:
-        return _sharp(source);
-
       case ScanFilter.grayscale:
-        return img.grayscale(source);
+        return _grayscale(source);
 
       case ScanFilter.blackWhite:
         return _blackWhite(source);
-
-      case ScanFilter.magicColor:
-        return _magicColor(source);
     }
   }
 
-  // ============================================================
-  // Document
-  // ============================================================
-  //
-  // مهم:
-  //
-  // قبلاً:
-  //
-  // adjustColor
-  // +
-  // whitenPaper
-  // +
-  // convolution
-  //
-  // انجام می‌شد.
-  //
-  // الان فقط adjustColor انجام می‌شود.
-  //
-  // این کار برای سرعت بسیار بهتر است.
-  // ============================================================
-
-  static img.Image _document(img.Image image) {
-    return img.adjustColor(
-      image,
-      contrast: 1.12,
+  /// ==========================================================
+  /// DOCUMENT
+  /// ==========================================================
+  ///
+  /// مناسب برای نامه، برگه و اسناد.
+  ///
+  /// هدف:
+  /// - سفیدتر شدن کاغذ
+  /// - خواناتر شدن متن
+  /// - حفظ جزئیات
+  /// - جلوگیری از سفید شدن بیش از حد متن
+  static img.Image _document(
+    img.Image source,
+  ) {
+    final result = img.adjustColor(
+      source,
       brightness: 1.04,
-      saturation: 0.94,
-    );
-  }
-
-  // ============================================================
-  // Sharp
-  // ============================================================
-
-  static img.Image _sharp(img.Image image) {
-    var result = img.adjustColor(image, contrast: 1.10, brightness: 1.02);
-
-    // فقط در صورت انتخاب صریح Sharp
-    // عملیات convolution انجام می‌شود.
-    result = img.convolution(
-      result,
-      filter: const [0, -1, 0, -1, 5, -1, 0, -1, 0],
+      contrast: 1.08,
+      saturation: 0.88,
     );
 
-    return result;
-  }
+    /// سفید کردن نرم پس‌زمینه.
+    ///
+    /// فقط پیکسل‌هایی که روشن هستند تحت تأثیر قرار می‌گیرند.
+    /// پیکسل‌های تیره مربوط به متن هستند و تقریباً دست‌نخورده
+    /// باقی می‌مانند.
+    for (int y = 0; y < result.height; y++) {
+      for (int x = 0; x < result.width; x++) {
+        final pixel = result.getPixel(x, y);
 
-  // ============================================================
-  // Black & White
-  // ============================================================
+        final r = pixel.r.toDouble();
+        final g = pixel.g.toDouble();
+        final b = pixel.b.toDouble();
 
-  static img.Image _blackWhite(img.Image image) {
-    var result = img.grayscale(image);
+        /// روشنایی تقریبی
+        final luminance =
+            0.299 * r +
+            0.587 * g +
+            0.114 * b;
 
-    result = img.adjustColor(result, contrast: 1.30, brightness: 1.04);
+        /// میزان اختلاف رنگ.
+        final maxChannel = math.max(
+          r,
+          math.max(g, b),
+        );
 
-    for (final pixel in result) {
-      final luminance = pixel.luminance;
+        final minChannel = math.min(
+          r,
+          math.min(g, b),
+        );
 
-      if (luminance > 185) {
-        pixel.r = 255;
-        pixel.g = 255;
-        pixel.b = 255;
-      } else {
-        pixel.r = 0;
-        pixel.g = 0;
-        pixel.b = 0;
+        final chroma =
+            maxChannel - minChannel;
+
+        /// فقط نواحی نسبتاً سفید/روشن.
+        if (luminance > 175 && chroma < 55) {
+          /// هرچه روشن‌تر باشد، سفید شدن بیشتر.
+          final amount =
+              ((luminance - 175) / 80)
+                  .clamp(0.0, 1.0);
+
+          final strength =
+              0.18 + (amount * 0.42);
+
+          final nr =
+              r + (255.0 - r) * strength;
+
+          final ng =
+              g + (255.0 - g) * strength;
+
+          final nb =
+              b + (255.0 - b) * strength;
+
+          pixel
+            ..r = nr.round().clamp(0, 255)
+            ..g = ng.round().clamp(0, 255)
+            ..b = nb.round().clamp(0, 255);
+        }
       }
     }
 
     return result;
   }
 
-  // ============================================================
-  // Magic Color
-  // ============================================================
+  /// ==========================================================
+  /// GRAYSCALE
+  /// ==========================================================
 
-  static img.Image _magicColor(img.Image image) {
-    return img.adjustColor(
-      image,
-      brightness: 1.04,
-      contrast: 1.08,
-      saturation: 0.96,
+  static img.Image _grayscale(
+    img.Image source,
+  ) {
+    return img.grayscale(source);
+  }
+
+  /// ==========================================================
+  /// BLACK & WHITE
+  /// ==========================================================
+
+  static img.Image _blackWhite(
+    img.Image source,
+  ) {
+    final gray = img.grayscale(source);
+
+    /// کنتراست قبل از Threshold
+    final adjusted = img.adjustColor(
+      gray,
+      contrast: 1.18,
+      brightness: 1.02,
+    );
+
+    return img.grayscale(
+      adjusted,
     );
   }
 }

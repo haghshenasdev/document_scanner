@@ -9,199 +9,106 @@ import 'image_enhancer.dart';
 import 'perspective_corrector.dart';
 
 /// ============================================================
-/// Performance Settings
+/// PERFORMANCE / QUALITY
 /// ============================================================
 
-/// Detection فقط روی این اندازه انجام می‌شود.
-///
-/// 640 نسبت به 800 به شکل محسوسی سریع‌تر است.
-const int _detectionSize = 640;
+/// Detection فقط روی تصویر کوچک انجام می‌شود.
+const int _detectionSize = 800;
 
-/// حداکثر اندازه خروجی نهایی.
-///
-/// برای اسکن A4 کیفیت مناسبی دارد و از 3000 بسیار سریع‌تر است.
-const int _maxOutputSize = 2200;
-
-/// حداقل اندازه خروجی.
-const int _minOutputSize = 1200;
-
-/// کیفیت JPEG.
-///
-/// 92 برای اسکن معمولی کیفیت بسیار خوبی دارد و از 95 سریع‌تر است.
-const int _jpegQuality = 92;
+/// کیفیت JPEG نهایی.
+/// توجه: عکس اصلی هرگز Encode مجدد نمی‌شود.
+const int _jpegQuality = 100;
 
 /// ============================================================
-/// Process Full Image
+/// DETECTION ONLY
 /// ============================================================
-
-Future<Map<String, dynamic>> processImageInIsolate(
+///
+/// این تابع فقط برای زمان Capture است.
+///
+/// کارهایی که انجام می‌دهد:
+/// 1. Decode
+/// 2. اصلاح Orientation
+/// 3. Resize کوچک
+/// 4. Detection
+///
+/// کارهایی که انجام نمی‌دهد:
+/// - Perspective
+/// - Filter
+/// - Enhancement
+/// - JPEG encode
+///
+/// بنابراین Capture بسیار سریع‌تر می‌شود.
+Future<Map<String, dynamic>> detectImageInIsolate(
   Map<String, dynamic> args,
 ) async {
   final Uint8List bytes = args['bytes'] as Uint8List;
 
-  final int filterIndex = _readFilterIndex(args);
-
-  // ------------------------------------------------------------
-  // 1. Decode
-  // ------------------------------------------------------------
-
-  final img.Image? decoded = img.decodeImage(bytes);
+  final decoded = img.decodeImage(bytes);
 
   if (decoded == null) {
     throw Exception('فرمت تصویر قابل تشخیص نیست');
   }
 
-  // ------------------------------------------------------------
-  // 2. Orientation
-  // ------------------------------------------------------------
-
-  final img.Image fixed = img.bakeOrientation(decoded);
+  /// Orientation را اصلاح می‌کنیم تا مختصات گوشه‌ها
+  /// با تصویری که بعداً پردازش می‌شود هماهنگ باشد.
+  final fixed = img.bakeOrientation(decoded);
 
   final int originalWidth = fixed.width;
   final int originalHeight = fixed.height;
 
-  // ------------------------------------------------------------
-  // 3. Detection
-  // ------------------------------------------------------------
+  /// ----------------------------------------------------------
+  /// Detection image
+  /// ----------------------------------------------------------
 
-  final double detectionScale = _calculateScale(
-    originalWidth,
-    originalHeight,
-    _detectionSize,
-  );
+  final int largestSide =
+      originalWidth > originalHeight ? originalWidth : originalHeight;
+
+  final double scale = largestSide > _detectionSize
+      ? _detectionSize / largestSide
+      : 1.0;
 
   final img.Image detectionImage;
 
-  if (detectionScale < 1.0) {
+  if (scale < 1.0) {
     detectionImage = img.copyResize(
       fixed,
-      width: _scaledDimension(
-        originalWidth,
-        detectionScale,
-      ),
-      height: _scaledDimension(
-        originalHeight,
-        detectionScale,
-      ),
+      width: _scaledDimension(originalWidth, scale),
+      height: _scaledDimension(originalHeight, scale),
       interpolation: img.Interpolation.linear,
     );
   } else {
     detectionImage = fixed;
   }
 
-  final DocumentCorners? detected = DocumentDetector.detect(
-    detectionImage,
-  );
+  /// ----------------------------------------------------------
+  /// Detect
+  /// ----------------------------------------------------------
+
+  final DocumentCorners? detected =
+      DocumentDetector.detect(detectionImage);
 
   final DocumentCorners corners;
 
   if (detected != null) {
     corners = _scaleCorners(
       detected,
-      1.0 / detectionScale,
+      1.0 / scale,
     );
   } else {
     corners = _defaultCorners(fixed);
   }
 
-  // ------------------------------------------------------------
-  // 4. آماده‌سازی تصویر Perspective
-  // ------------------------------------------------------------
-
-  final double outputScale = _calculateScale(
-    originalWidth,
-    originalHeight,
-    _maxOutputSize,
-  );
-
-  final img.Image processingImage;
-
-  if (outputScale < 1.0) {
-    processingImage = img.copyResize(
-      fixed,
-      width: _scaledDimension(
-        originalWidth,
-        outputScale,
-      ),
-      height: _scaledDimension(
-        originalHeight,
-        outputScale,
-      ),
-      interpolation: img.Interpolation.linear,
-    );
-  } else {
-    processingImage = fixed;
-  }
-
-  final DocumentCorners processingCorners = _scaleCorners(
-    corners,
-    outputScale,
-  );
-
-  // ------------------------------------------------------------
-  // 5. Perspective
-  // ------------------------------------------------------------
-
-  final img.Image rectified = PerspectiveCorrector.rectify(
-    processingImage,
-    processingCorners,
-  );
-
-  // ------------------------------------------------------------
-  // 6. Filter
-  // ------------------------------------------------------------
-
-  final ScanFilter filter = _filterFromIndex(filterIndex);
-
-  final img.Image enhanced;
-
-  if (filter == ScanFilter.original) {
-    enhanced = rectified;
-  } else {
-    enhanced = ImageEnhancer.apply(
-      rectified,
-      filter,
-    );
-  }
-
-  // ------------------------------------------------------------
-  // 7. Encode processed image
-  // ------------------------------------------------------------
-
-  final Uint8List processedBytes = Uint8List.fromList(
-    img.encodeJpg(
-      enhanced,
-      quality: _jpegQuality,
-    ),
-  );
-
-  // ------------------------------------------------------------
-  // 8. Original image for editor
-  // ------------------------------------------------------------
-  //
-  // Editor به تصویر Orientation-correct نیاز دارد.
-  //
-  // برای اینکه دوباره یک تصویر 4000px یا 6000px را Encode نکنیم،
-  // همان processingImage را استفاده می‌کنیم.
-  //
-  // این بخش فقط یک JPEG Encode دارد.
-  // ------------------------------------------------------------
-
-  final Uint8List originalBytes = Uint8List.fromList(
-    img.encodeJpg(
-      processingImage,
-      quality: _jpegQuality,
-    ),
-  );
-
-  // ------------------------------------------------------------
-  // 9. Result
-  // ------------------------------------------------------------
+  /// ----------------------------------------------------------
+  /// Result
+  /// ----------------------------------------------------------
+  ///
+  /// مهم:
+  /// originalBytes را برنمی‌گردانیم چون همان bytes ورودی
+  /// باید در ScannerPage نگه داشته شود.
+  ///
+  /// فقط مختصات را برمی‌گردانیم.
 
   return <String, dynamic>{
-    'originalBytes': originalBytes,
-    'processedBytes': processedBytes,
-
     'topLeftX': corners.topLeft.dx,
     'topLeftY': corners.topLeft.dy,
 
@@ -217,137 +124,95 @@ Future<Map<String, dynamic>> processImageInIsolate(
 }
 
 /// ============================================================
-/// Process Crop
+/// PROCESS FULL IMAGE
 /// ============================================================
-
-Future<Map<String, dynamic>> processCropInIsolate(
+///
+/// این تابع دیگر نباید هنگام Capture اجرا شود.
+///
+/// برای Preview / Save استفاده می‌شود.
+///
+/// روند:
+///
+/// Original JPEG
+///      ↓
+/// Decode
+///      ↓
+/// Orientation
+///      ↓
+/// Perspective
+///      ↓
+/// Filter
+///      ↓
+/// JPEG 100
+///
+Future<Map<String, dynamic>> processImageInIsolate(
   Map<String, dynamic> args,
 ) async {
   final Uint8List bytes = args['bytes'] as Uint8List;
 
   final int filterIndex = _readFilterIndex(args);
 
-  final double topLeftX = _readDouble(
-    args,
-    'topLeftX',
-  );
+  final double topLeftX = _readDouble(args, 'topLeftX');
+  final double topLeftY = _readDouble(args, 'topLeftY');
 
-  final double topLeftY = _readDouble(
-    args,
-    'topLeftY',
-  );
+  final double topRightX = _readDouble(args, 'topRightX');
+  final double topRightY = _readDouble(args, 'topRightY');
 
-  final double topRightX = _readDouble(
-    args,
-    'topRightX',
-  );
+  final double bottomRightX =
+      _readDouble(args, 'bottomRightX');
 
-  final double topRightY = _readDouble(
-    args,
-    'topRightY',
-  );
+  final double bottomRightY =
+      _readDouble(args, 'bottomRightY');
 
-  final double bottomRightX = _readDouble(
-    args,
-    'bottomRightX',
-  );
+  final double bottomLeftX =
+      _readDouble(args, 'bottomLeftX');
 
-  final double bottomRightY = _readDouble(
-    args,
-    'bottomRightY',
-  );
+  final double bottomLeftY =
+      _readDouble(args, 'bottomLeftY');
 
-  final double bottomLeftX = _readDouble(
-    args,
-    'bottomLeftX',
-  );
+  /// ----------------------------------------------------------
+  /// Decode original
+  /// ----------------------------------------------------------
 
-  final double bottomLeftY = _readDouble(
-    args,
-    'bottomLeftY',
-  );
-
-  // ------------------------------------------------------------
-  // Decode
-  // ------------------------------------------------------------
-
-  final img.Image? decoded = img.decodeImage(bytes);
+  final decoded = img.decodeImage(bytes);
 
   if (decoded == null) {
     throw Exception('فرمت تصویر قابل تشخیص نیست');
   }
 
-  final img.Image fixed = img.bakeOrientation(decoded);
+  final fixed = img.bakeOrientation(decoded);
 
-  final int originalWidth = fixed.width;
-  final int originalHeight = fixed.height;
+  /// ----------------------------------------------------------
+  /// Corners
+  /// ----------------------------------------------------------
 
-  // ------------------------------------------------------------
-  // Resize
-  // ------------------------------------------------------------
-
-  final double outputScale = _calculateScale(
-    originalWidth,
-    originalHeight,
-    _maxOutputSize,
-  );
-
-  final img.Image processingImage;
-
-  if (outputScale < 1.0) {
-    processingImage = img.copyResize(
-      fixed,
-      width: _scaledDimension(
-        originalWidth,
-        outputScale,
-      ),
-      height: _scaledDimension(
-        originalHeight,
-        outputScale,
-      ),
-      interpolation: img.Interpolation.linear,
-    );
-  } else {
-    processingImage = fixed;
-  }
-
-  // ------------------------------------------------------------
-  // Corners
-  // ------------------------------------------------------------
-
-  final DocumentCorners corners = DocumentCorners(
-    topLeft: Offset(
-      topLeftX * outputScale,
-      topLeftY * outputScale,
-    ),
-    topRight: Offset(
-      topRightX * outputScale,
-      topRightY * outputScale,
-    ),
+  final corners = DocumentCorners(
+    topLeft: Offset(topLeftX, topLeftY),
+    topRight: Offset(topRightX, topRightY),
     bottomRight: Offset(
-      bottomRightX * outputScale,
-      bottomRightY * outputScale,
+      bottomRightX,
+      bottomRightY,
     ),
     bottomLeft: Offset(
-      bottomLeftX * outputScale,
-      bottomLeftY * outputScale,
+      bottomLeftX,
+      bottomLeftY,
     ),
   );
 
-  // ------------------------------------------------------------
-  // Perspective
-  // ------------------------------------------------------------
+  /// ----------------------------------------------------------
+  /// Perspective
+  /// ----------------------------------------------------------
 
-  final img.Image rectified = PerspectiveCorrector.rectify(
-    processingImage,
+  final rectified = PerspectiveCorrector.rectify(
+    fixed,
     corners,
   );
 
-  // ------------------------------------------------------------
-  // Filter
-  // ------------------------------------------------------------
+  /// ----------------------------------------------------------
+  /// Filter
+  /// ----------------------------------------------------------
 
-  final ScanFilter filter = _filterFromIndex(filterIndex);
+  final filter = _filterFromIndex(filterIndex);
 
   final img.Image enhanced;
 
@@ -360,11 +225,11 @@ Future<Map<String, dynamic>> processCropInIsolate(
     );
   }
 
-  // ------------------------------------------------------------
-  // Encode
-  // ------------------------------------------------------------
+  /// ----------------------------------------------------------
+  /// Final JPEG
+  /// ----------------------------------------------------------
 
-  final Uint8List processedBytes = Uint8List.fromList(
+  final processedBytes = Uint8List.fromList(
     img.encodeJpg(
       enhanced,
       quality: _jpegQuality,
@@ -377,30 +242,118 @@ Future<Map<String, dynamic>> processCropInIsolate(
 }
 
 /// ============================================================
-/// Helpers
+/// PROCESS CROP
 /// ============================================================
+///
+/// برای CropEditor استفاده می‌شود.
+///
+/// همیشه از originalBytes اصلی دوباره پردازش می‌کند.
+/// بنابراین با هر بار تغییر گوشه‌ها افت کیفیت تجمعی نداریم.
+Future<Map<String, dynamic>> processCropInIsolate(
+  Map<String, dynamic> args,
+) async {
+  final Uint8List bytes = args['bytes'] as Uint8List;
 
-double _calculateScale(
-  int width,
-  int height,
-  int maxSize,
-) {
-  final int largestSide =
-      width > height ? width : height;
+  final int filterIndex = _readFilterIndex(args);
 
-  if (largestSide <= maxSize) {
-    return 1.0;
+  final double topLeftX = _readDouble(args, 'topLeftX');
+  final double topLeftY = _readDouble(args, 'topLeftY');
+
+  final double topRightX = _readDouble(args, 'topRightX');
+  final double topRightY = _readDouble(args, 'topRightY');
+
+  final double bottomRightX =
+      _readDouble(args, 'bottomRightX');
+
+  final double bottomRightY =
+      _readDouble(args, 'bottomRightY');
+
+  final double bottomLeftX =
+      _readDouble(args, 'bottomLeftX');
+
+  final double bottomLeftY =
+      _readDouble(args, 'bottomLeftY');
+
+  /// ----------------------------------------------------------
+  /// Decode
+  /// ----------------------------------------------------------
+
+  final decoded = img.decodeImage(bytes);
+
+  if (decoded == null) {
+    throw Exception('فرمت تصویر قابل تشخیص نیست');
   }
 
-  return maxSize / largestSide;
+  final fixed = img.bakeOrientation(decoded);
+
+  /// ----------------------------------------------------------
+  /// Corners
+  /// ----------------------------------------------------------
+
+  final corners = DocumentCorners(
+    topLeft: Offset(topLeftX, topLeftY),
+    topRight: Offset(topRightX, topRightY),
+    bottomRight: Offset(
+      bottomRightX,
+      bottomRightY,
+    ),
+    bottomLeft: Offset(
+      bottomLeftX,
+      bottomLeftY,
+    ),
+  );
+
+  /// ----------------------------------------------------------
+  /// Perspective
+  /// ----------------------------------------------------------
+
+  final rectified = PerspectiveCorrector.rectify(
+    fixed,
+    corners,
+  );
+
+  /// ----------------------------------------------------------
+  /// Filter
+  /// ----------------------------------------------------------
+
+  final filter = _filterFromIndex(filterIndex);
+
+  final img.Image enhanced;
+
+  if (filter == ScanFilter.original) {
+    enhanced = rectified;
+  } else {
+    enhanced = ImageEnhancer.apply(
+      rectified,
+      filter,
+    );
+  }
+
+  /// ----------------------------------------------------------
+  /// Encode
+  /// ----------------------------------------------------------
+
+  final processedBytes = Uint8List.fromList(
+    img.encodeJpg(
+      enhanced,
+      quality: _jpegQuality,
+    ),
+  );
+
+  return <String, dynamic>{
+    'processedBytes': processedBytes,
+  };
 }
+
+/// ============================================================
+/// HELPERS
+/// ============================================================
 
 int _scaledDimension(
   int value,
   double scale,
 ) {
-  final int result =
-      (value * scale).round();
+  final result = (value * scale).round();
 
   return result < 1 ? 1 : result;
 }
@@ -432,11 +385,8 @@ DocumentCorners _scaleCorners(
 DocumentCorners _defaultCorners(
   img.Image image,
 ) {
-  final double w = image.width.toDouble();
-  final double h = image.height.toDouble();
-
-  final double marginX = w * 0.03;
-  final double marginY = h * 0.03;
+  final marginX = image.width * 0.06;
+  final marginY = image.height * 0.06;
 
   return DocumentCorners(
     topLeft: Offset(
@@ -444,16 +394,16 @@ DocumentCorners _defaultCorners(
       marginY,
     ),
     topRight: Offset(
-      w - marginX,
+      image.width - marginX,
       marginY,
     ),
     bottomRight: Offset(
-      w - marginX,
-      h - marginY,
+      image.width - marginX,
+      image.height - marginY,
     ),
     bottomLeft: Offset(
       marginX,
-      h - marginY,
+      image.height - marginY,
     ),
   );
 }
@@ -464,10 +414,31 @@ int _readFilterIndex(
   final value = args['filterIndex'];
 
   if (value is int) {
-    return value;
+    return value.clamp(
+      0,
+      ScanFilter.values.length - 1,
+    );
+  }
+
+  if (value is num) {
+    return value.toInt().clamp(
+      0,
+      ScanFilter.values.length - 1,
+    );
   }
 
   return 0;
+}
+
+ScanFilter _filterFromIndex(
+  int index,
+) {
+  final safeIndex = index.clamp(
+    0,
+    ScanFilter.values.length - 1,
+  );
+
+  return ScanFilter.values[safeIndex];
 }
 
 double _readDouble(
@@ -476,6 +447,14 @@ double _readDouble(
 ) {
   final value = args[key];
 
+  if (value is double) {
+    return value;
+  }
+
+  if (value is int) {
+    return value.toDouble();
+  }
+
   if (value is num) {
     return value.toDouble();
   }
@@ -483,15 +462,4 @@ double _readDouble(
   throw Exception(
     'مختصات $key معتبر نیست',
   );
-}
-
-ScanFilter _filterFromIndex(
-  int index,
-) {
-  if (index < 0 ||
-      index >= ScanFilter.values.length) {
-    return ScanFilter.original;
-  }
-
-  return ScanFilter.values[index];
 }
