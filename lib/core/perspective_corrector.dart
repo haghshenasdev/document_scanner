@@ -6,31 +6,30 @@ import 'package:image/image.dart' as img;
 import '../models/document_corners.dart';
 
 class PerspectiveCorrector {
-  /// حداقل اندازه خروجی
   static const int minDimension = 100;
 
-  /// حداکثر اندازه خروجی
-  ///
-  /// اگر null باشد، محدودیتی اعمال نمی‌شود.
-  ///
-  /// برای حفظ حداکثر کیفیت، فعلاً محدودیت سخت 2200 حذف شده
-  /// و اندازه خروجی بر اساس ابعاد واقعی سند محاسبه می‌شود.
-  static const int? maxDimension = null;
+  /// برای Preview محدودیت داریم.
+  static const int previewMaxDimension = 1400;
 
-  static img.Image rectify(img.Image source, DocumentCorners corners) {
+  /// برای خروجی نهایی محدودیت نداریم.
+  static const int? finalMaxDimension = null;
+
+  static img.Image rectify(
+    img.Image source,
+    DocumentCorners corners, {
+    bool preview = false,
+  }) {
     final tl = corners.topLeft;
     final tr = corners.topRight;
     final br = corners.bottomRight;
     final bl = corners.bottomLeft;
 
-    // ------------------------------------------------------------
-    // بررسی گوشه‌ها
-    // ------------------------------------------------------------
-
     final topWidth = _distance(tl, tr);
+
     final bottomWidth = _distance(bl, br);
 
     final leftHeight = _distance(tl, bl);
+
     final rightHeight = _distance(tr, br);
 
     if (topWidth <= 1 ||
@@ -40,20 +39,13 @@ class PerspectiveCorrector {
       throw Exception('اندازه گوشه‌های تصویر معتبر نیست');
     }
 
-    // ------------------------------------------------------------
-    // اندازه واقعی سند
-    // ------------------------------------------------------------
+    final estimatedWidth = (topWidth + bottomWidth) * .5;
 
-    final estimatedWidth = (topWidth + bottomWidth) * 0.5;
-    final estimatedHeight = (leftHeight + rightHeight) * 0.5;
+    final estimatedHeight = (leftHeight + rightHeight) * .5;
 
     if (estimatedWidth <= 1 || estimatedHeight <= 1) {
       throw Exception('اندازه خروجی غیرمعتبر است');
     }
-
-    // ------------------------------------------------------------
-    // نسبت تصویر
-    // ------------------------------------------------------------
 
     final aspectRatio = estimatedWidth / estimatedHeight;
 
@@ -61,52 +53,36 @@ class PerspectiveCorrector {
       throw Exception('نسبت تصویر غیرمعتبر است');
     }
 
-    // ------------------------------------------------------------
-    // تعیین رزولوشن خروجی
-    // ------------------------------------------------------------
-
     int width = estimatedWidth.round();
+
     int height = estimatedHeight.round();
 
     width = math.max(minDimension, width);
+
     height = math.max(minDimension, height);
 
-    // ------------------------------------------------------------
-    // محدودیت اختیاری
-    // ------------------------------------------------------------
+    final int? maxDimension = preview ? previewMaxDimension : finalMaxDimension;
 
     if (maxDimension != null &&
-        (width > maxDimension! || height > maxDimension!)) {
-      final scale = maxDimension! / math.max(width, height);
+        (width > maxDimension || height > maxDimension)) {
+      final scale = maxDimension / math.max(width, height);
 
       width = math.max(minDimension, (width * scale).round());
 
       height = math.max(minDimension, (height * scale).round());
     }
 
-    // ------------------------------------------------------------
-    // بررسی نسبت نهایی
-    // ------------------------------------------------------------
-
     final finalRatio = width / height;
 
-    if (!finalRatio.isFinite || finalRatio < 0.30 || finalRatio > 3.50) {
+    if (!finalRatio.isFinite || finalRatio < .30 || finalRatio > 3.50) {
       throw Exception('نسبت گوشه‌های انتخاب‌شده غیرطبیعی است');
     }
-
-    // ------------------------------------------------------------
-    // ساخت تصویر مقصد
-    // ------------------------------------------------------------
 
     final destination = img.Image(
       width: width,
       height: height,
       numChannels: source.numChannels,
     );
-
-    // ------------------------------------------------------------
-    // Perspective Correction
-    // ------------------------------------------------------------
 
     return img.copyRectify(
       source,
@@ -121,6 +97,7 @@ class PerspectiveCorrector {
 
   static double _distance(Offset a, Offset b) {
     final dx = a.dx - b.dx;
+
     final dy = a.dy - b.dy;
 
     return math.sqrt(dx * dx + dy * dy);

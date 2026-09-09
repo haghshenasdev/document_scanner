@@ -1,3 +1,4 @@
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -9,35 +10,27 @@ import 'image_enhancer.dart';
 import 'perspective_corrector.dart';
 
 /// ============================================================
-/// PERFORMANCE / QUALITY
+/// PERFORMANCE
 /// ============================================================
 
-/// Detection فقط روی تصویر کوچک انجام می‌شود.
-const int _detectionSize = 800;
+/// Detection فقط یک بار و در همین اندازه انجام می‌شود.
+/// DocumentDetector هم حداکثر 640 را استفاده می‌کند.
+const int _detectionSize = 640;
 
-/// کیفیت JPEG نهایی.
-/// توجه: عکس اصلی هرگز Encode مجدد نمی‌شود.
-const int _jpegQuality = 100;
+/// حداکثر اندازه Preview.
+/// فایل نهایی با رزولوشن کامل تولید می‌شود.
+const int _previewMaxDimension = 1400;
+
+/// کیفیت Preview
+const int _previewJpegQuality = 82;
+
+/// کیفیت فایل نهایی
+const int _finalJpegQuality = 92;
 
 /// ============================================================
-/// DETECTION ONLY
+/// DETECTION
 /// ============================================================
-///
-/// این تابع فقط برای زمان Capture است.
-///
-/// کارهایی که انجام می‌دهد:
-/// 1. Decode
-/// 2. اصلاح Orientation
-/// 3. Resize کوچک
-/// 4. Detection
-///
-/// کارهایی که انجام نمی‌دهد:
-/// - Perspective
-/// - Filter
-/// - Enhancement
-/// - JPEG encode
-///
-/// بنابراین Capture بسیار سریع‌تر می‌شود.
+
 Future<Map<String, dynamic>> detectImageInIsolate(
   Map<String, dynamic> args,
 ) async {
@@ -49,19 +42,15 @@ Future<Map<String, dynamic>> detectImageInIsolate(
     throw Exception('فرمت تصویر قابل تشخیص نیست');
   }
 
-  /// Orientation را اصلاح می‌کنیم تا مختصات گوشه‌ها
-  /// با تصویری که بعداً پردازش می‌شود هماهنگ باشد.
   final fixed = img.bakeOrientation(decoded);
 
   final int originalWidth = fixed.width;
+
   final int originalHeight = fixed.height;
 
-  /// ----------------------------------------------------------
-  /// Detection image
-  /// ----------------------------------------------------------
-
-  final int largestSide =
-      originalWidth > originalHeight ? originalWidth : originalHeight;
+  final int largestSide = originalWidth > originalHeight
+      ? originalWidth
+      : originalHeight;
 
   final double scale = largestSide > _detectionSize
       ? _detectionSize / largestSide
@@ -80,33 +69,15 @@ Future<Map<String, dynamic>> detectImageInIsolate(
     detectionImage = fixed;
   }
 
-  /// ----------------------------------------------------------
-  /// Detect
-  /// ----------------------------------------------------------
-
-  final DocumentCorners? detected =
-      DocumentDetector.detect(detectionImage);
+  final DocumentCorners? detected = DocumentDetector.detect(detectionImage);
 
   final DocumentCorners corners;
 
   if (detected != null) {
-    corners = _scaleCorners(
-      detected,
-      1.0 / scale,
-    );
+    corners = _scaleCorners(detected, 1.0 / scale);
   } else {
     corners = _defaultCorners(fixed);
   }
-
-  /// ----------------------------------------------------------
-  /// Result
-  /// ----------------------------------------------------------
-  ///
-  /// مهم:
-  /// originalBytes را برنمی‌گردانیم چون همان bytes ورودی
-  /// باید در ScannerPage نگه داشته شود.
-  ///
-  /// فقط مختصات را برمی‌گردانیم.
 
   return <String, dynamic>{
     'topLeftX': corners.topLeft.dx,
@@ -120,59 +91,66 @@ Future<Map<String, dynamic>> detectImageInIsolate(
 
     'bottomLeftX': corners.bottomLeft.dx,
     'bottomLeftY': corners.bottomLeft.dy,
+
+    'imageWidth': fixed.width,
+
+    'imageHeight': fixed.height,
   };
 }
 
 /// ============================================================
-/// PROCESS FULL IMAGE
+/// FULL PROCESS
 /// ============================================================
 ///
-/// این تابع دیگر نباید هنگام Capture اجرا شود.
+/// این تابع هم Preview و هم خروجی نهایی را انجام می‌دهد.
 ///
-/// برای Preview / Save استفاده می‌شود.
+/// preview = true
+///     → حداکثر 1400px
+///     → JPEG 82
 ///
-/// روند:
+/// preview = false
+///     → رزولوشن کامل
+///     → JPEG 92
 ///
-/// Original JPEG
-///      ↓
-/// Decode
-///      ↓
-/// Orientation
-///      ↓
-/// Perspective
-///      ↓
-/// Filter
-///      ↓
-/// JPEG 100
+/// progressPort اختیاری است.
+/// اگر ارسال شود، وضعیت هر مرحله را به UI می‌فرستد.
 ///
+
 Future<Map<String, dynamic>> processImageInIsolate(
   Map<String, dynamic> args,
 ) async {
+  final progressPort = args['progressPort'];
+
+  void sendProgress(String stage, {String state = 'start', int? elapsedMs}) {
+    if (progressPort is SendPort) {
+      progressPort.send({
+        'type': 'stage',
+        'stage': stage,
+        'state': state,
+        'elapsedMs': elapsedMs,
+      });
+    }
+  }
+
+  final Map<String, int> timings = <String, int>{};
+
+  final bool preview = args['preview'] == true;
+
+  final int rotationQuarterTurns = _readRotation(args);
+
+  final stopwatch = Stopwatch();
+
+  // ==========================================================
+  // DECODE
+  // ==========================================================
+
+  stopwatch
+    ..reset()
+    ..start();
+
+  sendProgress('Decode');
+
   final Uint8List bytes = args['bytes'] as Uint8List;
-
-  final int filterIndex = _readFilterIndex(args);
-
-  final double topLeftX = _readDouble(args, 'topLeftX');
-  final double topLeftY = _readDouble(args, 'topLeftY');
-
-  final double topRightX = _readDouble(args, 'topRightX');
-  final double topRightY = _readDouble(args, 'topRightY');
-
-  final double bottomRightX =
-      _readDouble(args, 'bottomRightX');
-
-  final double bottomRightY =
-      _readDouble(args, 'bottomRightY');
-
-  final double bottomLeftX =
-      _readDouble(args, 'bottomLeftX');
-
-  final double bottomLeftY =
-      _readDouble(args, 'bottomLeftY');
-
-  /// ----------------------------------------------------------
-  /// Decode original
-  /// ----------------------------------------------------------
 
   final decoded = img.decodeImage(bytes);
 
@@ -180,37 +158,190 @@ Future<Map<String, dynamic>> processImageInIsolate(
     throw Exception('فرمت تصویر قابل تشخیص نیست');
   }
 
-  final fixed = img.bakeOrientation(decoded);
+  stopwatch.stop();
 
-  /// ----------------------------------------------------------
-  /// Corners
-  /// ----------------------------------------------------------
+  timings['Decode'] = stopwatch.elapsedMilliseconds;
+
+  sendProgress(
+    'Decode',
+    state: 'done',
+    elapsedMs: stopwatch.elapsedMilliseconds,
+  );
+
+  // ==========================================================
+  // ORIENTATION
+  // ==========================================================
+
+  stopwatch
+    ..reset()
+    ..start();
+
+  sendProgress('Orientation');
+
+  img.Image fixed = img.bakeOrientation(decoded);
+
+  stopwatch.stop();
+
+  timings['Orientation'] = stopwatch.elapsedMilliseconds;
+
+  sendProgress(
+    'Orientation',
+    state: 'done',
+    elapsedMs: stopwatch.elapsedMilliseconds,
+  );
+
+  // ==========================================================
+  // ROTATION
+  // ==========================================================
+
+  if (rotationQuarterTurns != 0) {
+    stopwatch
+      ..reset()
+      ..start();
+
+    sendProgress('Rotation');
+
+    fixed = img.copyRotate(
+      fixed,
+      angle: rotationQuarterTurns * 90,
+      interpolation: img.Interpolation.nearest,
+    );
+
+    stopwatch.stop();
+
+    timings['Rotation'] = stopwatch.elapsedMilliseconds;
+
+    sendProgress(
+      'Rotation',
+      state: 'done',
+      elapsedMs: stopwatch.elapsedMilliseconds,
+    );
+  }
+
+  // ==========================================================
+  // RESIZE PREVIEW
+  // ==========================================================
+
+  if (preview) {
+    final largestSide = fixed.width > fixed.height ? fixed.width : fixed.height;
+
+    if (largestSide > _previewMaxDimension) {
+      stopwatch
+        ..reset()
+        ..start();
+
+      sendProgress('Resize');
+
+      final scale = _previewMaxDimension / largestSide;
+
+      fixed = img.copyResize(
+        fixed,
+        width: _scaledDimension(fixed.width, scale),
+        height: _scaledDimension(fixed.height, scale),
+        interpolation: img.Interpolation.linear,
+      );
+
+      stopwatch.stop();
+
+      timings['Resize'] = stopwatch.elapsedMilliseconds;
+
+      sendProgress(
+        'Resize',
+        state: 'done',
+        elapsedMs: stopwatch.elapsedMilliseconds,
+      );
+    }
+  }
+
+  // ==========================================================
+  // CORNERS
+  // ==========================================================
 
   final corners = DocumentCorners(
-    topLeft: Offset(topLeftX, topLeftY),
-    topRight: Offset(topRightX, topRightY),
+    topLeft: Offset(
+      _readDouble(args, 'topLeftX'),
+      _readDouble(args, 'topLeftY'),
+    ),
+    topRight: Offset(
+      _readDouble(args, 'topRightX'),
+      _readDouble(args, 'topRightY'),
+    ),
     bottomRight: Offset(
-      bottomRightX,
-      bottomRightY,
+      _readDouble(args, 'bottomRightX'),
+      _readDouble(args, 'bottomRightY'),
     ),
     bottomLeft: Offset(
-      bottomLeftX,
-      bottomLeftY,
+      _readDouble(args, 'bottomLeftX'),
+      _readDouble(args, 'bottomLeftY'),
     ),
   );
 
-  /// ----------------------------------------------------------
-  /// Perspective
-  /// ----------------------------------------------------------
+  // ==========================================================
+  // SCALE CORNERS FOR PREVIEW
+  // ==========================================================
+
+  final originalWidth = args['sourceWidth'] is num
+      ? (args['sourceWidth'] as num).toDouble()
+      : fixed.width.toDouble();
+
+  final originalHeight = args['sourceHeight'] is num
+      ? (args['sourceHeight'] as num).toDouble()
+      : fixed.height.toDouble();
+
+  final cornerScaleX = fixed.width / originalWidth;
+
+  final cornerScaleY = fixed.height / originalHeight;
+
+  final processCorners = DocumentCorners(
+    topLeft: Offset(
+      corners.topLeft.dx * cornerScaleX,
+      corners.topLeft.dy * cornerScaleY,
+    ),
+    topRight: Offset(
+      corners.topRight.dx * cornerScaleX,
+      corners.topRight.dy * cornerScaleY,
+    ),
+    bottomRight: Offset(
+      corners.bottomRight.dx * cornerScaleX,
+      corners.bottomRight.dy * cornerScaleY,
+    ),
+    bottomLeft: Offset(
+      corners.bottomLeft.dx * cornerScaleX,
+      corners.bottomLeft.dy * cornerScaleY,
+    ),
+  );
+
+  // ==========================================================
+  // PERSPECTIVE
+  // ==========================================================
+
+  stopwatch
+    ..reset()
+    ..start();
+
+  sendProgress('Perspective');
 
   final rectified = PerspectiveCorrector.rectify(
     fixed,
-    corners,
+    processCorners,
+    preview: preview,
   );
 
-  /// ----------------------------------------------------------
-  /// Filter
-  /// ----------------------------------------------------------
+  stopwatch.stop();
+
+  timings['Perspective'] = stopwatch.elapsedMilliseconds;
+
+  sendProgress(
+    'Perspective',
+    state: 'done',
+    elapsedMs: stopwatch.elapsedMilliseconds,
+  );
+
+  // ==========================================================
+  // FILTER
+  // ==========================================================
+
+  final filterIndex = _readFilterIndex(args);
 
   final filter = _filterFromIndex(filterIndex);
 
@@ -219,158 +350,104 @@ Future<Map<String, dynamic>> processImageInIsolate(
   if (filter == ScanFilter.original) {
     enhanced = rectified;
   } else {
-    enhanced = ImageEnhancer.apply(
-      rectified,
-      filter,
+    stopwatch
+      ..reset()
+      ..start();
+
+    sendProgress('Filter');
+
+    enhanced = ImageEnhancer.apply(rectified, filter);
+
+    stopwatch.stop();
+
+    timings['Filter'] = stopwatch.elapsedMilliseconds;
+
+    sendProgress(
+      'Filter',
+      state: 'done',
+      elapsedMs: stopwatch.elapsedMilliseconds,
     );
   }
 
-  /// ----------------------------------------------------------
-  /// Final JPEG
-  /// ----------------------------------------------------------
+  // ==========================================================
+  // JPEG
+  // ==========================================================
+
+  stopwatch
+    ..reset()
+    ..start();
+
+  sendProgress('JPEG Encode');
 
   final processedBytes = Uint8List.fromList(
     img.encodeJpg(
       enhanced,
-      quality: _jpegQuality,
+      quality: preview ? _previewJpegQuality : _finalJpegQuality,
     ),
+  );
+
+  stopwatch.stop();
+
+  timings['JPEG Encode'] = stopwatch.elapsedMilliseconds;
+
+  sendProgress(
+    'JPEG Encode',
+    state: 'done',
+    elapsedMs: stopwatch.elapsedMilliseconds,
   );
 
   return <String, dynamic>{
     'processedBytes': processedBytes,
+    'stageTimes': timings,
   };
 }
 
 /// ============================================================
-/// PROCESS CROP
+/// CROP PROCESS
 /// ============================================================
-///
-/// برای CropEditor استفاده می‌شود.
-///
-/// همیشه از originalBytes اصلی دوباره پردازش می‌کند.
-/// بنابراین با هر بار تغییر گوشه‌ها افت کیفیت تجمعی نداریم.
+
 Future<Map<String, dynamic>> processCropInIsolate(
   Map<String, dynamic> args,
 ) async {
-  final Uint8List bytes = args['bytes'] as Uint8List;
+  final progressPort = args['progressPort'];
 
-  final int filterIndex = _readFilterIndex(args);
+  final result = await processImageInIsolate({
+    ...args,
+    'preview': false,
+    'progressPort': progressPort,
+  });
 
-  final double topLeftX = _readDouble(args, 'topLeftX');
-  final double topLeftY = _readDouble(args, 'topLeftY');
-
-  final double topRightX = _readDouble(args, 'topRightX');
-  final double topRightY = _readDouble(args, 'topRightY');
-
-  final double bottomRightX =
-      _readDouble(args, 'bottomRightX');
-
-  final double bottomRightY =
-      _readDouble(args, 'bottomRightY');
-
-  final double bottomLeftX =
-      _readDouble(args, 'bottomLeftX');
-
-  final double bottomLeftY =
-      _readDouble(args, 'bottomLeftY');
-
-  /// ----------------------------------------------------------
-  /// Decode
-  /// ----------------------------------------------------------
-
-  final decoded = img.decodeImage(bytes);
-
-  if (decoded == null) {
-    throw Exception('فرمت تصویر قابل تشخیص نیست');
-  }
-
-  final fixed = img.bakeOrientation(decoded);
-
-  /// ----------------------------------------------------------
-  /// Corners
-  /// ----------------------------------------------------------
-
-  final corners = DocumentCorners(
-    topLeft: Offset(topLeftX, topLeftY),
-    topRight: Offset(topRightX, topRightY),
-    bottomRight: Offset(
-      bottomRightX,
-      bottomRightY,
-    ),
-    bottomLeft: Offset(
-      bottomLeftX,
-      bottomLeftY,
-    ),
-  );
-
-  /// ----------------------------------------------------------
-  /// Perspective
-  /// ----------------------------------------------------------
-
-  final rectified = PerspectiveCorrector.rectify(
-    fixed,
-    corners,
-  );
-
-  /// ----------------------------------------------------------
-  /// Filter
-  /// ----------------------------------------------------------
-
-  final filter = _filterFromIndex(filterIndex);
-
-  final img.Image enhanced;
-
-  if (filter == ScanFilter.original) {
-    enhanced = rectified;
-  } else {
-    enhanced = ImageEnhancer.apply(
-      rectified,
-      filter,
-    );
-  }
-
-  /// ----------------------------------------------------------
-  /// Encode
-  /// ----------------------------------------------------------
-
-  final processedBytes = Uint8List.fromList(
-    img.encodeJpg(
-      enhanced,
-      quality: _jpegQuality,
-    ),
-  );
-
-  return <String, dynamic>{
-    'processedBytes': processedBytes,
-  };
+  return result;
 }
 
 /// ============================================================
 /// HELPERS
 /// ============================================================
 
-int _scaledDimension(
-  int value,
-  double scale,
-) {
+int _readRotation(Map<String, dynamic> args) {
+  final value = args['rotationQuarterTurns'];
+
+  if (value is int) {
+    return value % 4;
+  }
+
+  if (value is num) {
+    return value.toInt() % 4;
+  }
+
+  return 0;
+}
+
+int _scaledDimension(int value, double scale) {
   final result = (value * scale).round();
 
   return result < 1 ? 1 : result;
 }
 
-DocumentCorners _scaleCorners(
-  DocumentCorners corners,
-  double scale,
-) {
+DocumentCorners _scaleCorners(DocumentCorners corners, double scale) {
   return DocumentCorners(
-    topLeft: Offset(
-      corners.topLeft.dx * scale,
-      corners.topLeft.dy * scale,
-    ),
-    topRight: Offset(
-      corners.topRight.dx * scale,
-      corners.topRight.dy * scale,
-    ),
+    topLeft: Offset(corners.topLeft.dx * scale, corners.topLeft.dy * scale),
+    topRight: Offset(corners.topRight.dx * scale, corners.topRight.dy * scale),
     bottomRight: Offset(
       corners.bottomRight.dx * scale,
       corners.bottomRight.dy * scale,
@@ -382,69 +459,40 @@ DocumentCorners _scaleCorners(
   );
 }
 
-DocumentCorners _defaultCorners(
-  img.Image image,
-) {
-  final marginX = image.width * 0.06;
-  final marginY = image.height * 0.06;
+DocumentCorners _defaultCorners(img.Image image) {
+  final marginX = image.width * .06;
+
+  final marginY = image.height * .06;
 
   return DocumentCorners(
-    topLeft: Offset(
-      marginX,
-      marginY,
-    ),
-    topRight: Offset(
-      image.width - marginX,
-      marginY,
-    ),
-    bottomRight: Offset(
-      image.width - marginX,
-      image.height - marginY,
-    ),
-    bottomLeft: Offset(
-      marginX,
-      image.height - marginY,
-    ),
+    topLeft: Offset(marginX, marginY),
+    topRight: Offset(image.width - marginX, marginY),
+    bottomRight: Offset(image.width - marginX, image.height - marginY),
+    bottomLeft: Offset(marginX, image.height - marginY),
   );
 }
 
-int _readFilterIndex(
-  Map<String, dynamic> args,
-) {
+int _readFilterIndex(Map<String, dynamic> args) {
   final value = args['filterIndex'];
 
   if (value is int) {
-    return value.clamp(
-      0,
-      ScanFilter.values.length - 1,
-    );
+    return value.clamp(0, ScanFilter.values.length - 1);
   }
 
   if (value is num) {
-    return value.toInt().clamp(
-      0,
-      ScanFilter.values.length - 1,
-    );
+    return value.toInt().clamp(0, ScanFilter.values.length - 1);
   }
 
   return 0;
 }
 
-ScanFilter _filterFromIndex(
-  int index,
-) {
-  final safeIndex = index.clamp(
-    0,
-    ScanFilter.values.length - 1,
-  );
+ScanFilter _filterFromIndex(int index) {
+  final safeIndex = index.clamp(0, ScanFilter.values.length - 1);
 
   return ScanFilter.values[safeIndex];
 }
 
-double _readDouble(
-  Map<String, dynamic> args,
-  String key,
-) {
+double _readDouble(Map<String, dynamic> args, String key) {
   final value = args[key];
 
   if (value is double) {
@@ -459,7 +507,5 @@ double _readDouble(
     return value.toDouble();
   }
 
-  throw Exception(
-    'مختصات $key معتبر نیست',
-  );
+  throw Exception('مختصات $key معتبر نیست');
 }
