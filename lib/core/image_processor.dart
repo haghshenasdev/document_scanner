@@ -10,22 +10,22 @@ import 'image_enhancer.dart';
 import 'perspective_corrector.dart';
 
 /// ============================================================
-/// PERFORMANCE
+/// SETTINGS
 /// ============================================================
 
-/// Detection فقط یک بار و در همین اندازه انجام می‌شود.
-/// DocumentDetector هم حداکثر 640 را استفاده می‌کند.
-const int _detectionSize = 640;
+/// اندازه‌ای که تشخیص گوشه روی آن انجام می‌شود.
+/// تشخیص روی تصویر کوچک بسیار سریع‌تر است.
+const int _detectionMaxDimension = 640;
 
-/// حداکثر اندازه Preview.
-/// فایل نهایی با رزولوشن کامل تولید می‌شود.
-const int _previewMaxDimension = 1400;
+/// Preview فقط برای نمایش داخل برنامه است.
+const int _previewMaxDimension = 1200;
 
-/// کیفیت Preview
-const int _previewJpegQuality = 82;
+/// کیفیت Preview.
+/// چون فقط برای نمایش است، لازم نیست خیلی بالا باشد.
+const int _previewJpegQuality = 88;
 
-/// کیفیت فایل نهایی
-const int _finalJpegQuality = 92;
+/// کیفیت خروجی نهایی.
+const int _finalJpegQuality = 96;
 
 /// ============================================================
 /// DETECTION
@@ -45,15 +45,14 @@ Future<Map<String, dynamic>> detectImageInIsolate(
   final fixed = img.bakeOrientation(decoded);
 
   final int originalWidth = fixed.width;
-
   final int originalHeight = fixed.height;
 
   final int largestSide = originalWidth > originalHeight
       ? originalWidth
       : originalHeight;
 
-  final double scale = largestSide > _detectionSize
-      ? _detectionSize / largestSide
+  final double scale = largestSide > _detectionMaxDimension
+      ? _detectionMaxDimension / largestSide
       : 1.0;
 
   final img.Image detectionImage;
@@ -93,64 +92,47 @@ Future<Map<String, dynamic>> detectImageInIsolate(
     'bottomLeftY': corners.bottomLeft.dy,
 
     'imageWidth': fixed.width,
-
     'imageHeight': fixed.height,
   };
 }
 
 /// ============================================================
-/// FULL PROCESS
+/// PROCESS
 /// ============================================================
-///
-/// این تابع هم Preview و هم خروجی نهایی را انجام می‌دهد.
-///
-/// preview = true
-///     → حداکثر 1400px
-///     → JPEG 82
-///
-/// preview = false
-///     → رزولوشن کامل
-///     → JPEG 92
-///
-/// progressPort اختیاری است.
-/// اگر ارسال شود، وضعیت هر مرحله را به UI می‌فرستد.
-///
 
 Future<Map<String, dynamic>> processImageInIsolate(
   Map<String, dynamic> args,
 ) async {
-  final progressPort = args['progressPort'];
+  final dynamic progressPortValue = args['progressPort'];
 
-  void sendProgress(String stage, {String state = 'start', int? elapsedMs}) {
-    if (progressPort is SendPort) {
-      progressPort.send({
-        'type': 'stage',
-        'stage': stage,
-        'state': state,
-        'elapsedMs': elapsedMs,
-      });
-    }
+  final SendPort? progressPort = progressPortValue is SendPort
+      ? progressPortValue
+      : null;
+
+  void sendStage(String stage, {required String state, int? elapsedMs}) {
+    progressPort?.send({
+      'type': 'stage',
+      'stage': stage,
+      'state': state,
+      'elapsedMs': elapsedMs,
+    });
   }
 
-  final Map<String, int> timings = <String, int>{};
+  final Map<String, int> stageTimes = <String, int>{};
 
   final bool preview = args['preview'] == true;
 
   final int rotationQuarterTurns = _readRotation(args);
 
-  final stopwatch = Stopwatch();
+  final Uint8List bytes = args['bytes'] as Uint8List;
 
   // ==========================================================
   // DECODE
   // ==========================================================
 
-  stopwatch
-    ..reset()
-    ..start();
+  final decodeWatch = Stopwatch()..start();
 
-  sendProgress('Decode');
-
-  final Uint8List bytes = args['bytes'] as Uint8List;
+  sendStage('Decode', state: 'start');
 
   final decoded = img.decodeImage(bytes);
 
@@ -158,36 +140,34 @@ Future<Map<String, dynamic>> processImageInIsolate(
     throw Exception('فرمت تصویر قابل تشخیص نیست');
   }
 
-  stopwatch.stop();
+  decodeWatch.stop();
 
-  timings['Decode'] = stopwatch.elapsedMilliseconds;
+  stageTimes['Decode'] = decodeWatch.elapsedMilliseconds;
 
-  sendProgress(
+  sendStage(
     'Decode',
     state: 'done',
-    elapsedMs: stopwatch.elapsedMilliseconds,
+    elapsedMs: decodeWatch.elapsedMilliseconds,
   );
 
   // ==========================================================
   // ORIENTATION
   // ==========================================================
 
-  stopwatch
-    ..reset()
-    ..start();
+  final orientationWatch = Stopwatch()..start();
 
-  sendProgress('Orientation');
+  sendStage('Orientation', state: 'start');
 
   img.Image fixed = img.bakeOrientation(decoded);
 
-  stopwatch.stop();
+  orientationWatch.stop();
 
-  timings['Orientation'] = stopwatch.elapsedMilliseconds;
+  stageTimes['Orientation'] = orientationWatch.elapsedMilliseconds;
 
-  sendProgress(
+  sendStage(
     'Orientation',
     state: 'done',
-    elapsedMs: stopwatch.elapsedMilliseconds,
+    elapsedMs: orientationWatch.elapsedMilliseconds,
   );
 
   // ==========================================================
@@ -195,11 +175,9 @@ Future<Map<String, dynamic>> processImageInIsolate(
   // ==========================================================
 
   if (rotationQuarterTurns != 0) {
-    stopwatch
-      ..reset()
-      ..start();
+    final rotationWatch = Stopwatch()..start();
 
-    sendProgress('Rotation');
+    sendStage('Rotation', state: 'start');
 
     fixed = img.copyRotate(
       fixed,
@@ -207,32 +185,37 @@ Future<Map<String, dynamic>> processImageInIsolate(
       interpolation: img.Interpolation.nearest,
     );
 
-    stopwatch.stop();
+    rotationWatch.stop();
 
-    timings['Rotation'] = stopwatch.elapsedMilliseconds;
+    stageTimes['Rotation'] = rotationWatch.elapsedMilliseconds;
 
-    sendProgress(
+    sendStage(
       'Rotation',
       state: 'done',
-      elapsedMs: stopwatch.elapsedMilliseconds,
+      elapsedMs: rotationWatch.elapsedMilliseconds,
     );
   }
 
   // ==========================================================
   // RESIZE PREVIEW
   // ==========================================================
+  //
+  // نکته مهم:
+  // Resize فقط در Preview انجام می‌شود.
+  // خروجی نهایی هرگز از این تصویر کوچک ساخته نمی‌شود.
+  //
 
   if (preview) {
-    final largestSide = fixed.width > fixed.height ? fixed.width : fixed.height;
+    final int largestSide = fixed.width > fixed.height
+        ? fixed.width
+        : fixed.height;
 
     if (largestSide > _previewMaxDimension) {
-      stopwatch
-        ..reset()
-        ..start();
+      final resizeWatch = Stopwatch()..start();
 
-      sendProgress('Resize');
+      sendStage('Resize', state: 'start');
 
-      final scale = _previewMaxDimension / largestSide;
+      final double scale = _previewMaxDimension / largestSide;
 
       fixed = img.copyResize(
         fixed,
@@ -241,14 +224,14 @@ Future<Map<String, dynamic>> processImageInIsolate(
         interpolation: img.Interpolation.linear,
       );
 
-      stopwatch.stop();
+      resizeWatch.stop();
 
-      timings['Resize'] = stopwatch.elapsedMilliseconds;
+      stageTimes['Resize'] = resizeWatch.elapsedMilliseconds;
 
-      sendProgress(
+      sendStage(
         'Resize',
         state: 'done',
-        elapsedMs: stopwatch.elapsedMilliseconds,
+        elapsedMs: resizeWatch.elapsedMilliseconds,
       );
     }
   }
@@ -257,7 +240,7 @@ Future<Map<String, dynamic>> processImageInIsolate(
   // CORNERS
   // ==========================================================
 
-  final corners = DocumentCorners(
+  final DocumentCorners corners = DocumentCorners(
     topLeft: Offset(
       _readDouble(args, 'topLeftX'),
       _readDouble(args, 'topLeftY'),
@@ -277,37 +260,34 @@ Future<Map<String, dynamic>> processImageInIsolate(
   );
 
   // ==========================================================
-  // SCALE CORNERS FOR PREVIEW
+  // SCALE CORNERS
   // ==========================================================
 
-  final originalWidth = args['sourceWidth'] is num
+  final double sourceWidth = args['sourceWidth'] is num
       ? (args['sourceWidth'] as num).toDouble()
       : fixed.width.toDouble();
 
-  final originalHeight = args['sourceHeight'] is num
+  final double sourceHeight = args['sourceHeight'] is num
       ? (args['sourceHeight'] as num).toDouble()
       : fixed.height.toDouble();
 
-  final cornerScaleX = fixed.width / originalWidth;
+  final double scaleX = fixed.width / sourceWidth;
 
-  final cornerScaleY = fixed.height / originalHeight;
+  final double scaleY = fixed.height / sourceHeight;
 
-  final processCorners = DocumentCorners(
-    topLeft: Offset(
-      corners.topLeft.dx * cornerScaleX,
-      corners.topLeft.dy * cornerScaleY,
-    ),
+  final DocumentCorners processCorners = DocumentCorners(
+    topLeft: Offset(corners.topLeft.dx * scaleX, corners.topLeft.dy * scaleY),
     topRight: Offset(
-      corners.topRight.dx * cornerScaleX,
-      corners.topRight.dy * cornerScaleY,
+      corners.topRight.dx * scaleX,
+      corners.topRight.dy * scaleY,
     ),
     bottomRight: Offset(
-      corners.bottomRight.dx * cornerScaleX,
-      corners.bottomRight.dy * cornerScaleY,
+      corners.bottomRight.dx * scaleX,
+      corners.bottomRight.dy * scaleY,
     ),
     bottomLeft: Offset(
-      corners.bottomLeft.dx * cornerScaleX,
-      corners.bottomLeft.dy * cornerScaleY,
+      corners.bottomLeft.dx * scaleX,
+      corners.bottomLeft.dy * scaleY,
     ),
   );
 
@@ -315,57 +295,53 @@ Future<Map<String, dynamic>> processImageInIsolate(
   // PERSPECTIVE
   // ==========================================================
 
-  stopwatch
-    ..reset()
-    ..start();
+  final perspectiveWatch = Stopwatch()..start();
 
-  sendProgress('Perspective');
+  sendStage('Perspective', state: 'start');
 
-  final rectified = PerspectiveCorrector.rectify(
+  final img.Image rectified = PerspectiveCorrector.rectify(
     fixed,
     processCorners,
     preview: preview,
   );
 
-  stopwatch.stop();
+  perspectiveWatch.stop();
 
-  timings['Perspective'] = stopwatch.elapsedMilliseconds;
+  stageTimes['Perspective'] = perspectiveWatch.elapsedMilliseconds;
 
-  sendProgress(
+  sendStage(
     'Perspective',
     state: 'done',
-    elapsedMs: stopwatch.elapsedMilliseconds,
+    elapsedMs: perspectiveWatch.elapsedMilliseconds,
   );
 
   // ==========================================================
   // FILTER
   // ==========================================================
 
-  final filterIndex = _readFilterIndex(args);
+  final int filterIndex = _readFilterIndex(args);
 
-  final filter = _filterFromIndex(filterIndex);
+  final ScanFilter filter = _filterFromIndex(filterIndex);
 
-  final img.Image enhanced;
+  img.Image enhanced;
 
   if (filter == ScanFilter.original) {
     enhanced = rectified;
   } else {
-    stopwatch
-      ..reset()
-      ..start();
+    final filterWatch = Stopwatch()..start();
 
-    sendProgress('Filter');
+    sendStage('Filter', state: 'start');
 
     enhanced = ImageEnhancer.apply(rectified, filter);
 
-    stopwatch.stop();
+    filterWatch.stop();
 
-    timings['Filter'] = stopwatch.elapsedMilliseconds;
+    stageTimes['Filter'] = filterWatch.elapsedMilliseconds;
 
-    sendProgress(
+    sendStage(
       'Filter',
       state: 'done',
-      elapsedMs: stopwatch.elapsedMilliseconds,
+      elapsedMs: filterWatch.elapsedMilliseconds,
     );
   }
 
@@ -373,51 +349,44 @@ Future<Map<String, dynamic>> processImageInIsolate(
   // JPEG
   // ==========================================================
 
-  stopwatch
-    ..reset()
-    ..start();
+  final jpegWatch = Stopwatch()..start();
 
-  sendProgress('JPEG Encode');
+  sendStage('JPEG Encode', state: 'start');
 
-  final processedBytes = Uint8List.fromList(
-    img.encodeJpg(
-      enhanced,
-      quality: preview ? _previewJpegQuality : _finalJpegQuality,
-    ),
+  final int quality = preview ? _previewJpegQuality : _finalJpegQuality;
+
+  final Uint8List processedBytes = Uint8List.fromList(
+    img.encodeJpg(enhanced, quality: quality),
   );
 
-  stopwatch.stop();
+  jpegWatch.stop();
 
-  timings['JPEG Encode'] = stopwatch.elapsedMilliseconds;
+  stageTimes['JPEG Encode'] = jpegWatch.elapsedMilliseconds;
 
-  sendProgress(
+  sendStage(
     'JPEG Encode',
     state: 'done',
-    elapsedMs: stopwatch.elapsedMilliseconds,
+    elapsedMs: jpegWatch.elapsedMilliseconds,
   );
 
   return <String, dynamic>{
     'processedBytes': processedBytes,
-    'stageTimes': timings,
+    'stageTimes': stageTimes,
   };
 }
 
 /// ============================================================
-/// CROP PROCESS
+/// CROP
 /// ============================================================
 
 Future<Map<String, dynamic>> processCropInIsolate(
   Map<String, dynamic> args,
 ) async {
-  final progressPort = args['progressPort'];
-
-  final result = await processImageInIsolate({
+  return processImageInIsolate({
     ...args,
     'preview': false,
-    'progressPort': progressPort,
+    'progressPort': args['progressPort'],
   });
-
-  return result;
 }
 
 /// ============================================================
@@ -439,7 +408,7 @@ int _readRotation(Map<String, dynamic> args) {
 }
 
 int _scaledDimension(int value, double scale) {
-  final result = (value * scale).round();
+  final int result = (value * scale).round();
 
   return result < 1 ? 1 : result;
 }
@@ -460,9 +429,9 @@ DocumentCorners _scaleCorners(DocumentCorners corners, double scale) {
 }
 
 DocumentCorners _defaultCorners(img.Image image) {
-  final marginX = image.width * .06;
+  final double marginX = image.width * .06;
 
-  final marginY = image.height * .06;
+  final double marginY = image.height * .06;
 
   return DocumentCorners(
     topLeft: Offset(marginX, marginY),
